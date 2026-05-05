@@ -1,0 +1,590 @@
+// ============================================================
+// CORVID 2.0 | managers/database/database-manager
+// Unified database access layer. Instantiates and owns all
+// four databases. All other managers query intelligence
+// exclusively through this manager.
+// ============================================================
+
+DatabaseManager = {}
+DatabaseManager.mediator    = null
+DatabaseManager.personDb    = null
+DatabaseManager.orgDb       = null
+DatabaseManager.credDb      = null
+DatabaseManager.targetDb    = null
+DatabaseManager.exploitKb   = null
+DatabaseManager.roostDb     = null
+DatabaseManager.snifferDb   = null
+
+DatabaseManager.init = function()
+    // Ensure /Corvid/Data/ exists on the Nest
+    sessionManager = self.mediator.getExtension("sessionManager")
+    handler = sessionManager.pivotSession.handler
+
+    corvid = handler.getFile("/Corvid")
+    if corvid isa Error then
+        result = handler.createFolder("/Corvid")
+        if result isa Error then
+            return result
+        end if
+    end if
+    data = handler.getFile("/Corvid/Data")
+    if data isa Error then
+        result = handler.createFolder("/Corvid/Data")
+        if result isa Error then
+            return result
+        end if
+    end if
+
+    // Instantiate raw databases
+    personsRaw = Database.New("persons")
+    personsRaw.setMediator(self.mediator)
+    personsRaw.load()
+
+    orgsRaw = Database.New("orgs")
+    orgsRaw.setMediator(self.mediator)
+    orgsRaw.load()
+
+    credsRaw = Database.New("credentials")
+    credsRaw.setMediator(self.mediator)
+    credsRaw.load()
+
+    targetsRaw = Database.New("targets")
+    targetsRaw.setMediator(self.mediator)
+    targetsRaw.load()
+
+    // Wrap in typed layers
+    self.personDb = PersonDb.New(personsRaw)
+    self.orgDb    = OrgDb.New(orgsRaw)
+    self.credDb   = CredentialDb.New(credsRaw)
+    self.targetDb = TargetDb.New(targetsRaw)
+
+    // Exploit knowledge base - separate file
+    self.exploitKb = ExploitKbManager.New()
+    self.exploitKb.setMediator(self.mediator)
+    self.exploitKb.init()
+
+    // Roost node pool - supports file chaining for large pools
+    self.roostDb = RoostDb
+    self.roostDb.setMediator(self.mediator)
+    self.roostDb.records = self.loadChainedList("roost", handler)
+
+    // Sniffer capture DB - supports file chaining for large capture sets
+    self.snifferDb = SnifferDb
+    self.snifferDb.setMediator(self.mediator)
+    snifferRecords = self.loadChainedList("sniffer", handler)
+    self.snifferDb.records = snifferRecords
+    if snifferRecords.len > 0 then
+        lastId = snifferRecords[snifferRecords.len - 1].id
+        numStr = lastId[3:]
+        self.snifferDb.nextId = numStr.val + 1
+    end if
+
+    // ShinyLibs DB
+    self.shinyLibsDb = ShinyLibsDb
+    self.shinyLibsDb.init()
+    shinyData = self.loadJson("shinylibs", handler)
+    if shinyData != null then
+        self.shinyLibsDb.deserialize(shinyData)
+    end if
+end function
+
+DatabaseManager.save = function()
+    // Save all dirty databases
+    results = []
+    r1 = self.personDb.db.save()
+    r2 = self.orgDb.db.save()
+    r3 = self.credDb.db.save()
+    r4 = self.targetDb.db.save()
+    r5 = self.exploitKb.save()
+    sessionManager = self.mediator.getExtension("sessionManager")
+    handler = sessionManager.pivotSession.handler
+    self.saveChainedList("roost", self.roostDb.records, handler)
+    self.saveChainedList("sniffer", self.snifferDb.records, handler)
+    self.saveJson("shinylibs", self.shinyLibsDb.serialize(), handler)
+    if r1 isa Error then
+        results.push(r1)
+    end if
+    if r2 isa Error then
+        results.push(r2)
+    end if
+    if r3 isa Error then
+        results.push(r3)
+    end if
+    if r4 isa Error then
+        results.push(r4)
+    end if
+    if r5 isa Error then
+        results.push(r5)
+    end if
+    if results.len > 0 then
+        return results[0]
+    end if
+end function
+
+// ---- Chained list persistence helpers ----
+// Used for roost and sniffer which store flat arrays rather than keyed maps.
+// Files: /Corvid/Data/<name>.json, /Corvid/Data/<name>_2.json, etc.
+// Each file is a JSON object: {"records": [...], "continued": "<next_path>"}
+// Always rewrites from file 1 to prevent stale records.
+
+DatabaseManager.listChainPath = function(name, n)
+    if n == 1 then
+        return "/Corvid/Data/" + name + ".json"
+    end if
+    return "/Corvid/Data/" + name + "_" + str(n) + ".json"
+end function
+
+// Simple JSON file load/save for non-chained single-file databases
+DatabaseManager.loadJson = function(name, handler)
+    filePath = "/Corvid/Data/" + name + ".json"
+    f = handler.getFile(filePath)
+    if f isa Error then
+        return null
+    end if
+    raw = f.content()
+    if raw == null or raw.len == 0 then
+        return null
+    end if
+    result = parse(raw)
+    if result == null then
+        return null
+    end if
+    return result
+end function
+
+DatabaseManager.saveJson = function(name, data, handler)
+    filePath = "/Corvid/Data/" + name + ".json"
+    encoded  = toJSON(data)
+    f = handler.getFile(filePath)
+    if f isa Error then
+        result = handler.createFile(filePath)
+        if result isa Error then
+            return result
+        end if
+        f = handler.getFile(filePath)
+        if f isa Error then
+            return f
+        end if
+    end if
+    f.setContent(encoded)
+end function
+
+DatabaseManager.loadChainedList = function(name, handler)
+    allRecords = []
+    currentN = 1
+    chainDone = false
+    while not chainDone
+        path = self.listChainPath(name, currentN)
+        file = handler.getFile(path)
+        if file isa Error then
+            chainDone = true
+        else
+            raw = file.content()
+            if raw isa Error or raw.len == 0 then
+                chainDone = true
+            else
+                parsed = parse(raw)
+                if parsed == null then
+                    chainDone = true
+                else
+                    // Support both old format (bare list) and new format (object with records key)
+                    if typeof(parsed) == "list" then
+                        for r in parsed
+                            allRecords.push(r)
+                        end for
+                        chainDone = true
+                    else if parsed.hasIndex("records") then
+                        for r in parsed.records
+                            allRecords.push(r)
+                        end for
+                        if parsed.hasIndex("continued") and parsed.continued.len > 0 then
+                            currentN = currentN + 1
+                        else
+                            chainDone = true
+                        end if
+                    else
+                        chainDone = true
+                    end if
+                end if
+            end if
+        end if
+    end while
+    return allRecords
+end function
+
+DatabaseManager.saveChainedList = function(name, records, handler)
+    THRESHOLD = 140000
+    // Partition records into chunks by running size estimate
+    chunks = []
+    currentChunk = []
+    currentSize = 2  // []
+    for r in records
+        entryJson = toJSON(r)
+        // comma + entry
+        entrySize = entryJson.len + 1
+        if currentSize + entrySize < THRESHOLD - 200 then
+            currentChunk.push(r)
+            currentSize = currentSize + entrySize
+        else
+            chunks.push(currentChunk)
+            currentChunk = [r]
+            currentSize = 2 + entryJson.len
+        end if
+    end for
+    if currentChunk.len > 0 then
+        chunks.push(currentChunk)
+    end if
+    if chunks.len == 0 then
+        chunks.push([])
+    end if
+
+    // Write each chunk - always from file 1
+    fileN = 1
+    for i in range(0, chunks.len - 1)
+        path = self.listChainPath(name, fileN)
+        fileObj = {}
+        fileObj.records = chunks[i]
+        if i < chunks.len - 1 then
+            fileObj.continued = self.listChainPath(name, fileN + 1)
+        else
+            fileObj.continued = ""
+        end if
+        file = handler.getFile(path)
+        if file isa Error then
+            handler.createFile(path)
+            file = handler.getFile(path)
+        end if
+        if not (file isa Error) then
+            file.setContent(toJSON(fileObj))
+        end if
+        fileN = fileN + 1
+    end for
+
+    // Delete any leftover chain files from previous larger saves
+    cleanN = fileN
+    cleanDone = false
+    while not cleanDone
+        cleanPath = self.listChainPath(name, cleanN)
+        cleanFile = handler.getFile(cleanPath)
+        if cleanFile isa Error then
+            cleanDone = true
+        else
+            cleanFile.delete()
+            cleanN = cleanN + 1
+        end if
+    end while
+end function
+
+// ---- Person operations ----
+
+DatabaseManager.upsertPerson = function(data)
+    return self.personDb.upsert(data)
+end function
+
+DatabaseManager.findPerson = function(term)
+    return self.personDb.search(term)
+end function
+
+DatabaseManager.findPersonByEmail = function(email)
+    return self.personDb.findByEmail(email)
+end function
+
+DatabaseManager.findPersonByIp = function(ip)
+    return self.personDb.findByIp(ip)
+end function
+
+DatabaseManager.allPersons = function()
+    return self.personDb.all()
+end function
+
+DatabaseManager.getPerson = function(id)
+    return self.personDb.get(id)
+end function
+
+// ---- Organisation operations ----
+
+DatabaseManager.upsertOrg = function(data)
+    return self.orgDb.upsert(data)
+end function
+
+DatabaseManager.findOrg = function(term)
+    return self.orgDb.search(term)
+end function
+
+DatabaseManager.findOrgByDomain = function(domain)
+    return self.orgDb.findByDomain(domain)
+end function
+
+DatabaseManager.findOrgByIp = function(ip)
+    return self.orgDb.findByIp(ip)
+end function
+
+DatabaseManager.allOrgs = function()
+    return self.orgDb.all()
+end function
+
+DatabaseManager.getOrg = function(id)
+    return self.orgDb.get(id)
+end function
+
+// ---- Credential operations ----
+
+DatabaseManager.upsertCredential = function(data)
+    return self.credDb.upsert(data)
+end function
+
+DatabaseManager.getExploitKb = function()
+    return self.exploitKb
+end function
+
+DatabaseManager.kbLookup = function(libName, libVersion)
+    return self.exploitKb.lookup(libName, libVersion)
+end function
+
+DatabaseManager.kbRecord = function(libName, libVersion, address, exploit, outcome, constraints, rtype, resultPath, privilege, blockedBy)
+    return self.exploitKb.record(libName, libVersion, address, exploit, outcome, constraints, rtype, resultPath, privilege, blockedBy)
+end function
+
+DatabaseManager.kbGetBest = function(libName, libVersion)
+    return self.exploitKb.getBestExploit(libName, libVersion)
+end function
+
+DatabaseManager.kbStats = function()
+    return self.exploitKb.stats()
+end function
+
+DatabaseManager.updateCredentialRecord = function(record)
+    return self.credDb.updateRecord(record)
+end function
+
+DatabaseManager.findCredentials = function(term)
+    return self.credDb.search(term)
+end function
+
+DatabaseManager.findCredentialsByIp = function(ip)
+    return self.credDb.findByIp(ip)
+end function
+
+DatabaseManager.findCredentialsByType = function(credType)
+    return self.credDb.findByType(credType)
+end function
+
+DatabaseManager.findCrackedCredentials = function()
+    return self.credDb.findCracked()
+end function
+
+DatabaseManager.allCredentials = function()
+    return self.credDb.all()
+end function
+
+// Helper: Find root system credentials for SSH access
+DatabaseManager.findRootSshCredentials = function(ip)
+    creds = self.findCredentialsByIp(ip)
+    result = {"password": "", "native_pass": ""}
+    for cred in creds
+        if cred.type == CRED_TYPES.SYSTEM and cred.username == "root" then
+            if cred.password.len > 0 then
+                result.password = cred.password
+            end if
+            if cred.hasIndex("native_pass") and cred.native_pass.len > 0 then
+                result.native_pass = cred.native_pass
+            end if
+        end if
+    end for
+    return result
+end function
+
+// Helper: Extract all unique root passwords (current + native) for escalation
+DatabaseManager.extractRootPasswords = function(ip)
+    creds = self.findCredentialsByIp(ip)
+    passwords = []
+    for cred in creds
+        if cred.type == CRED_TYPES.SYSTEM and cred.username == "root" then
+            if cred.password.len > 0 and passwords.indexOf(cred.password) == null then
+                passwords.push(cred.password)
+            end if
+            if cred.hasIndex("native_pass") and cred.native_pass.len > 0 then
+                if passwords.indexOf(cred.native_pass) == null then
+                    passwords.push(cred.native_pass)
+                end if
+            end if
+        end if
+    end for
+    return passwords
+end function
+
+// Helper: Find specific user credentials by IP and username
+DatabaseManager.findUserCredentials = function(ip, username)
+    creds = self.findCredentialsByIp(ip)
+    result = []
+    for cred in creds
+        if cred.username == username then
+            result.push(cred)
+        end if
+    end for
+    return result
+end function
+
+// Helper: Find any system credential (prefers root, falls back to any system user)
+DatabaseManager.findAnySystemCredentials = function(ip)
+    creds = self.findCredentialsByIp(ip)
+    result = {"username": "", "password": ""}
+    
+    // Pass 1: prefer root
+    for cred in creds
+        if cred.username == "root" and cred.password.len > 0 then
+            result.username = "root"
+            result.password = cred.password
+            return result
+        end if
+        if cred.username == "root" and cred.hasIndex("native_pass") and cred.native_pass.len > 0 then
+            if result.password.len == 0 then
+                result.username = "root"
+                result.password = cred.native_pass
+            end if
+        end if
+    end for
+    
+    // Pass 2: fall back to any system credential
+    if result.password.len == 0 then
+        for cred in creds
+            cType = ""
+            if cred.hasIndex("type") then
+                cType = cred.type
+            end if
+            if cType != "system" then
+                continue
+            end if
+            if cred.password.len > 0 then
+                result.username = cred.username
+                result.password = cred.password
+                break
+            end if
+            if cred.hasIndex("native_pass") and cred.native_pass.len > 0 then
+                result.username = cred.username
+                result.password = cred.native_pass
+                break
+            end if
+        end for
+    end if
+    
+    return result
+end function
+
+// ---- Target operations ----
+
+DatabaseManager.upsertTarget = function(data)
+    return self.targetDb.upsert(data)
+end function
+
+DatabaseManager.findTarget = function(ip)
+    results = self.targetDb.findByPublicIp(ip)
+    if results.len == 0 then
+        results = self.targetDb.findByLanIp(ip)
+    end if
+    return results
+end function
+
+DatabaseManager.findTargetsByStatus = function(status)
+    return self.targetDb.findByStatus(status)
+end function
+
+DatabaseManager.findBounces = function()
+    return self.targetDb.findBounces()
+end function
+
+DatabaseManager.allTargets = function()
+    return self.targetDb.all()
+end function
+
+DatabaseManager.getTarget = function(id)
+    return self.targetDb.get(id)
+end function
+
+DatabaseManager.storeExploits = function(targetId, libKey, exploits)
+    return self.targetDb.storeExploits(targetId, libKey, exploits)
+end function
+
+DatabaseManager.getExploits = function(targetId, libKey)
+    return self.targetDb.getExploits(targetId, libKey)
+end function
+
+DatabaseManager.setTargetStatus = function(targetId, status)
+    return self.targetDb.setStatus(targetId, status)
+end function
+
+// ---- Linking operations ----
+
+DatabaseManager.linkPersonToOrg = function(personId, orgId)
+    record = self.personDb.get(personId)
+    if record isa Error then
+        return record
+    end if
+    record.org_id = orgId
+    self.personDb.db.set(personId, record)
+end function
+
+DatabaseManager.linkCredentialToPerson = function(credId, personId)
+    record = self.credDb.get(credId)
+    if record isa Error then
+        return record
+    end if
+    record.person_id = personId
+    self.credDb.db.set(credId, record)
+end function
+
+DatabaseManager.addNote = function(collection, id, note)
+    if collection == "person" then
+        return self.personDb.addNote(id, note)
+    end if
+    if collection == "org"    then
+        return self.orgDb.addNote(id, note)
+    end if
+    if collection == "target" then
+        return self.targetDb.addNote(id, note)
+    end if
+    return Error.New("Unknown collection: " + collection, "UNKNOWN_COLLECTION")
+end function
+
+// ---- Sniffer operations ----
+
+DatabaseManager.addSnifferCapture = function(raw, capturedFrom)
+    return self.snifferDb.add(raw, capturedFrom)
+end function
+
+DatabaseManager.getSnifferCapture = function(id)
+    return self.snifferDb.find(id)
+end function
+
+DatabaseManager.allSnifferCaptures = function()
+    return self.snifferDb.records
+end function
+
+DatabaseManager.removeSnifferCapture = function(id)
+    return self.snifferDb.remove(id)
+end function
+
+// ---- Stats ----
+
+DatabaseManager.stats = function()
+    result = {}
+    result.persons     = self.personDb.db.count()
+    result.orgs        = self.orgDb.db.count()
+    result.credentials = self.credDb.db.count()
+    result.targets     = self.targetDb.db.count()
+    result.sniffer     = self.snifferDb.records.len
+    return result
+end function
+
+DatabaseManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+DatabaseManager.New = function()
+    result = new DatabaseManager
+    result.personDb = null
+    result.orgDb    = null
+    result.credDb   = null
+    result.targetDb = null
+    return result
+end function

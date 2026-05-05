@@ -1,0 +1,112 @@
+// ============================================================
+// CORVID 2.0 | managers/session/shell-session
+// Extends ComputerSession with shell-specific operations:
+// SSH connections, file transfer, build, launch, activate.
+// ============================================================
+
+ShellSession = new ComputerSession
+
+ShellSession.shell = null
+
+ShellSession.connectTo = function(ip, port, user, pass, service)
+    if service == null then
+        service = "ssh"
+    end if
+    newShell = self.shell.connectTo(ip, port, user, pass, service)
+    if newShell isa Error then
+        return newShell
+    end if
+    return ShellSession.New(newShell)
+end function
+
+ShellSession.transferFileFrom = function(srcPath, destFolder, otherSession)
+    // Pull a file FROM otherSession TO this session
+    srcFile = otherSession.getFile(srcPath)
+    if srcFile isa Error then
+        return srcFile
+    end if
+    destDir = self.getFile(destFolder)
+    if destDir isa Error then
+        return destDir
+    end if
+    return otherSession.shell.transferFile(srcFile.path(), destDir.path(), self.shell)
+end function
+
+ShellSession.transferFileTo = function(srcPath, destFolder, otherSession)
+    // Push a file FROM this session TO otherSession
+    srcFile = self.getFile(srcPath)
+    if srcFile isa Error then
+        return srcFile
+    end if
+    destDir = otherSession.getFile(destFolder)
+    if destDir isa Error then
+        return destDir
+    end if
+    return self.shell.transferFile(srcFile.path(), destDir.path(), otherSession.shell)
+end function
+
+ShellSession.launch = function(path, args)
+    file = self.getFile(path)
+    if file isa Error then
+        return file
+    end if
+    return self.shell.launch(file.path(), args)
+end function
+
+ShellSession.build = function(srcPath, destPath)
+    srcFile = self.getFile(srcPath)
+    if srcFile isa Error then
+        return srcFile
+    end if
+    return self.shell.build(srcFile.path(), destPath)
+end function
+
+ShellSession.activate = function()
+    self.shell.activate()
+end function
+
+ShellSession.corruptLogs = function()
+    // Create a fresh empty file then move it onto system.log, atomically
+    // replacing the log content. This is more reliable than set_content("")
+    // or delete+recreate since the move overwrites the existing file in place.
+    rawComp = self.shell.shell.host_computer
+    logFile = rawComp.File("/var/system.log")
+    if logFile == null then
+        return "Log does not exist - nothing to wipe."
+    end if
+    rawComp.touch("/var", "t")
+    emptyFile = rawComp.File("/var/t")
+    if emptyFile == null then
+        return Error.New("Could not create temp file - need root access", "WIPE_FAILED")
+    end if
+    moveResult = emptyFile.move("/var", "system.log")
+    if moveResult != 1 then
+        emptyFile.delete()
+        return Error.New("Could not replace system.log", "WIPE_FAILED")
+    end if
+    return "Log wiped."
+end function
+
+ShellSession.type = function()
+    return "shell"
+end function
+
+ShellSession.New = function(shell)
+    result         = new ShellSession
+    result.shell   = shell
+    computer       = shell.getComputer()
+    if computer isa Error then
+        return computer
+    end if
+    result.computer = computer
+    rootFile        = computer.getFile("/")
+    if rootFile isa Error then
+        result.root    = null
+        result.current = null
+    else
+        result.root    = climbFileToRoot(rootFile)
+        result.current = rootFile
+    end if
+    result.user = getUserFromHandler(result)
+    return result
+end function

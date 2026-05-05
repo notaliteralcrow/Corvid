@@ -1,0 +1,89 @@
+// ============================================================
+// CORVID 2.0 | facades/computer
+// Wraps the game Computer object.
+// ============================================================
+
+Computer = {}
+Computer.computer = null
+
+Computer.name = function()
+    return self.computer.get_name
+end function
+
+Computer.lanIp = function()
+    return self.computer.local_ip
+end function
+
+Computer.getFile = function(path)
+    result = self.computer.File(path)
+    if result == null then
+        return Error.New("File not found: " + path, "NOT_FOUND")
+    end if
+    return File.New(result)
+end function
+
+Computer.touch = function(path, name)
+    result = self.computer.touch(path, name)
+    if typeof(result) == "string" then
+        return Error.New(result, "TOUCH_ERROR")
+    end if
+end function
+
+Computer.createFolder = function(path, name)
+    result = self.computer.create_folder(path, name)
+    if typeof(result) == "string" then
+        return Error.New(result, "MKDIR_ERROR")
+    end if
+end function
+
+Computer.addUser = function(user, password)
+    result = self.computer.create_user(user, password)
+    if typeof(result) == "string" then
+        return Error.New(result, "ADDUSER_ERROR")
+    end if
+end function
+
+Computer.deleteUser = function(user, removeHome)
+    if removeHome == null then
+        removeHome = false
+    end if
+    result = self.computer.delete_user(user, removeHome)
+    if typeof(result) == "string" then
+        return Error.New(result, "DELUSER_ERROR")
+    end if
+end function
+
+Computer.changePassword = function(user, password)
+    result = self.computer.change_password(user, password)
+    if typeof(result) == "string" then
+        return Error.New(result, "PASSWD_ERROR")
+    end if
+end function
+
+Computer.showProcs = function()
+    return ssvToList(self.computer.show_procs)
+end function
+
+Computer.closeProcess = function(pid)
+    result = self.computer.close_program(pid.val)
+    if typeof(result) == "string" then
+        return Error.New(result, "KILL_ERROR")
+    end if
+end function
+
+Computer.getPorts = function()
+    return self.computer.get_ports
+end function
+
+Computer.isNetworkActive = function()
+    return self.computer.is_network_active == 1
+end function
+
+Computer.New = function(computer)
+    if typeof(computer) != "computer" then
+        return Error.New("Cannot create Computer from non-computer object", "TYPE_ERROR")
+    end if
+    result = new Computer
+    result.computer = computer
+    return result
+end function

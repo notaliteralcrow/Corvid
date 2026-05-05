@@ -1,0 +1,252 @@
+// ============================================================
+// CORVID 2.0 | managers/lib/metaxploit-manager
+// Orchestrates all metaxploit operations through the
+// lib-manager. Handles the hack workflow, rshell,
+// and net_use connections.
+// ============================================================
+
+MetaxploitManager = {}
+MetaxploitManager.mediator = null
+
+MetaxploitManager.getMetaxploit = function()
+    // When platform is active, use roost node metaxploit so exploit
+    // traffic originates from the roost node rather than Nest
+    platformManager = self.mediator.getExtension("platformManager")
+    if platformManager != null and platformManager.active then
+        roostMeta = platformManager.getMeta()
+        if roostMeta != null then
+            return roostMeta
+        end if
+    end if
+    libManager = self.mediator.getExtension("libManager")
+    meta = libManager.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta
+end function
+
+MetaxploitManager.getPivotMetaxploit = function()
+    libManager = self.mediator.getExtension("libManager")
+    meta = libManager.getPivotMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta
+end function
+
+MetaxploitManager.netUse = function(ip, port)
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta.netUse(ip, port)
+end function
+
+MetaxploitManager.getTargetLib = function(ip, port)
+    // Connect and dump the target library
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    session = meta.netUse(ip, port)
+    if session isa Error then
+        return session
+    end if
+    lib = session.dump_lib
+    if lib == null then
+        return Error.New("dump_lib returned null for " + ip + ":" + port, "DUMP_LIB_ERROR")
+    end if
+    return lib
+end function
+
+MetaxploitManager.checkActiveUsers = function(ip, port)
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return false
+    end if
+    session = meta.netUse(ip, port)
+    if session isa Error then
+        return false
+    end if
+    if session.is_any_active_user == 1 then
+        if session.is_root_active_user == 1 then
+            return "root"
+        end if
+        return "user"
+    end if
+    return false
+end function
+
+MetaxploitManager.hack = function(ip, port)
+    // Full automated hack chain using pivot metaxploit
+    // 1. Get target lib via current metaxploit
+    // 2. Run hack via pivot metaxploit (where our .so lives)
+    // 3. Return structured results
+    currentMeta = self.getMetaxploit()
+    if currentMeta isa Error then
+        return currentMeta
+    end if
+    pivotMeta = self.getPivotMetaxploit()
+    if pivotMeta isa Error then
+        return pivotMeta
+    end if
+
+    session = currentMeta.netUse(ip, port)
+    if session isa Error then
+        return session
+    end if
+
+    targetLib = session.dump_lib
+    if targetLib == null then
+        return Error.New("Could not get target library", "DUMP_LIB_ERROR")
+    end if
+
+    // Get vulnerabilities using pivot metaxploit
+    vulns = pivotMeta.getVulnerabilities(targetLib)
+    if vulns isa Error then
+        return vulns
+    end if
+
+    // Test each exploit and collect results
+    results = []
+    for vuln in vulns
+        for exploit in vuln.exploits
+            // Fresh session for each attempt
+            freshSession = currentMeta.netUse(ip, port)
+            if freshSession isa Error then
+                continue
+            end if
+            freshLib = freshSession.dump_lib
+            if freshLib == null then
+                continue
+            end if
+
+            raw = freshLib.overflow(vuln.address, exploit)
+            if raw == null or typeof(raw) == "number" or typeof(raw) == "string" then
+                entry = {}
+                entry.address   = vuln.address
+                entry.exploit   = exploit
+                entry.rtype     = "Failed"
+                entry.privilege = "none"
+                results.push(entry)
+                continue
+            end if
+
+            rtype     = typeof(raw)
+            privilege = "unknown"
+
+            if rtype == "shell" then
+                comp = raw.host_computer
+                privilege = self.detectPrivilege(comp)
+            else if rtype == "computer" then
+                privilege = self.detectPrivilege(raw)
+            else if rtype == "file" then
+                privilege = raw.path
+            end if
+
+            entry = {}
+            entry.address   = vuln.address
+            entry.exploit   = exploit
+            entry.rtype     = rtype
+            entry.privilege = privilege
+            entry.raw       = raw
+            results.push(entry)
+        end for
+    end for
+
+    if results.len == 0 then
+        return Error.New("No exploits could be tested", "NO_RESULTS")
+    end if
+
+    return results
+end function
+
+MetaxploitManager.detectPrivilege = function(computer)
+    rootFolder = computer.File("/root")
+    if rootFolder != null and rootFolder.has_permission("w") then
+        return "root"
+    end if
+    homeFolder = computer.File("/home")
+    if homeFolder != null then
+        for userFolder in homeFolder.get_folders()
+            if userFolder.name == "guest" then
+                continue
+            end if
+            if userFolder.has_permission("w") then
+                return userFolder.name
+            end if
+        end for
+    end if
+    guestFolder = computer.File("/home/guest")
+    if guestFolder != null and guestFolder.has_permission("w") then
+        return "guest"
+    end if
+    return "unknown"
+end function
+
+MetaxploitManager.getBestResult = function(results)
+    // Priority: Shell root > Shell user > Computer root >
+    //           Computer user > Computer guest > File > Failed
+    for r in results
+        if r.rtype == "shell" and r.privilege == "root" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == "shell" and r.privilege != "unknown" and r.privilege != "guest" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == "computer" and r.privilege == "root" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == "computer" and r.privilege != "unknown" and r.privilege != "guest" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == "computer" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == "file" then
+            return r
+        end if
+    end for
+    return null
+end function
+
+MetaxploitManager.flockList = function()
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta.flockServer()
+end function
+
+MetaxploitManager.flockClient = function(ip, port, processName)
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta.flockClient(ip, port, processName)
+end function
+
+MetaxploitManager.addLib = function(rawLib, data)
+    libManager = self.mediator.getExtension("libManager")
+    return libManager.addLib(rawLib, data)
+end function
+
+MetaxploitManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+MetaxploitManager.New = function()
+    result = new MetaxploitManager
+    return result
+end function

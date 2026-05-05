@@ -1,0 +1,312 @@
+// ============================================================
+// CORVID 2.0 | managers/database/database
+// Core database engine. Backed by JSON files on the Nest.
+// Provides generic read, write, upsert, query, delete.
+// Each database is a map keyed by record id.
+//
+// CHAINING:
+//   When a file exceeds SPLIT_THRESHOLD chars on save, it is
+//   closed with a {"__continued": "name_2.json"} marker and
+//   a new file is started. On load all files in the chain are
+//   merged into one in-memory map. Writes always go to the
+//   latest file (lazy strategy - stale copies in earlier files
+//   are overwritten on next load).
+//
+// OPTIMIZATIONS:
+//   - ipIndex: map of publicIp -> id for O(1) IP lookups
+//   - idCounter: tracks highest ID number to avoid full scan
+//   - dirty flag prevents redundant saves
+// ============================================================
+
+Database = {}
+Database.mediator     = null
+Database.name         = null
+Database.records      = {}
+Database.ipIndex      = {}
+Database.idCounter    = 0
+Database.dirty        = false
+Database.chainIndex   = 1      // current file number (1 = name.json, 2 = name_2.json...)
+Database.SPLIT_THRESHOLD = 140000
+
+Database.basePath = function()
+    return "/Corvid/Data/" + self.name + ".json"
+end function
+
+Database.chainPath = function(n)
+    if n == 1 then
+        return "/Corvid/Data/" + self.name + ".json"
+    end if
+    return "/Corvid/Data/" + self.name + "_" + str(n) + ".json"
+end function
+
+Database.rebuildIndex = function()
+    self.ipIndex   = {}
+    self.idCounter = 0
+    for kv in self.records
+        rec = kv.value
+        id  = kv.key
+        if rec.hasIndex("public_ip") and rec.public_ip.len > 0 then
+            self.ipIndex[rec.public_ip] = id
+        end if
+        if id.len > 2 then
+            num = id[2:].val
+            if num > self.idCounter then
+                self.idCounter = num
+            end if
+        end if
+    end for
+end function
+
+Database.load = function()
+    sessionManager = self.mediator.getExtension("sessionManager")
+    handler = sessionManager.pivotSession.handler
+
+    self.records   = {}
+    self.ipIndex   = {}
+    self.idCounter = 0
+    self.chainIndex = 1
+
+    // Follow the chain, merging all files into records
+    currentN = 1
+    while true
+        path = self.chainPath(currentN)
+        file = handler.getFile(path)
+        if file isa Error then
+            // No file at this index - stop (chainIndex stays at last good file)
+            if currentN > 1 then
+                self.chainIndex = currentN - 1
+            end if
+            break
+        end if
+        raw = file.content()
+        if raw isa Error or raw.len == 0 then
+            if currentN > 1 then
+                self.chainIndex = currentN - 1
+            end if
+            break
+        end if
+        parsed = parse(raw)
+        if parsed == null then
+            if currentN > 1 then
+                self.chainIndex = currentN - 1
+            end if
+            break
+        end if
+
+        // Check for continuation marker
+        nextFile = ""
+        if parsed.hasIndex("__continued") then
+            nextFile = parsed["__continued"]
+            parsed.remove("__continued")
+        end if
+
+        // Merge records - later files overwrite earlier ones (lazy dedup)
+        for kv in parsed
+            if kv.key != "__continued" then
+                self.records[kv.key] = kv.value
+            end if
+        end for
+
+        if nextFile.len > 0 then
+            // Advance to next file in chain
+            currentN = currentN + 1
+        else
+            // This is the last file in the chain
+            self.chainIndex = currentN
+            break
+        end if
+    end while
+
+    self.rebuildIndex()
+end function
+
+Database.save = function()
+    if not self.dirty then
+        return
+    end if
+    sessionManager = self.mediator.getExtension("sessionManager")
+    handler = sessionManager.pivotSession.handler
+
+    // Collect all record keys (excluding any __continued sentinel)
+    allKeys = []
+    for kv in self.records
+        if kv.key != "__continued" then
+            allKeys.push(kv.key)
+        end if
+    end for
+
+    // Partition records into chunks that each fit within SPLIT_THRESHOLD.
+    // We always rewrite from file 1 so there are never stale records in
+    // earlier chain files from a previous session's split point.
+    // Use a running size estimate to avoid O(n^2) toJSON calls.
+    chunks = []
+    currentChunk = {}
+    currentSize = 2  // opening/closing braces of {}
+    for k in allKeys
+        recJson = toJSON(self.records[k])
+        // key + colon + value + comma + quotes = key.len + recJson.len + 4
+        entrySize = k.len + recJson.len + 4
+        // Keep 200 chars of headroom for the __continued marker
+        if currentSize + entrySize < self.SPLIT_THRESHOLD - 200 then
+            currentChunk[k] = self.records[k]
+            currentSize = currentSize + entrySize
+        else
+            chunks.push(currentChunk)
+            currentChunk = {}
+            currentChunk[k] = self.records[k]
+            currentSize = 2 + entrySize
+        end if
+    end for
+    if currentChunk.len > 0 then
+        chunks.push(currentChunk)
+    end if
+
+    if chunks.len == 0 then
+        // Empty database - write empty file
+        chunks.push({})
+    end if
+
+    // Write each chunk to its chain file.
+    // All but the last get a __continued pointer to the next file.
+    fileN = 1
+    for i in range(0, chunks.len - 1)
+        chunk = chunks[i]
+        path = self.chainPath(fileN)
+        if i < chunks.len - 1 then
+            chunk["__continued"] = self.chainPath(fileN + 1)
+        end if
+        file = handler.getFile(path)
+        if file isa Error then
+            result = handler.createFile(path)
+            if result isa Error then
+                return result
+            end if
+            file = handler.getFile(path)
+            if file isa Error then
+                return file
+            end if
+        end if
+        file.setContent(toJSON(chunk))
+        fileN = fileN + 1
+    end for
+
+    // Delete any chain files beyond what we just wrote (left over from
+    // a previous session that had more chunks than we need now)
+    cleanN = fileN
+    cleanDone = false
+    while not cleanDone
+        cleanPath = self.chainPath(cleanN)
+        cleanFile = handler.getFile(cleanPath)
+        if cleanFile isa Error then
+            cleanDone = true
+        else
+            cleanFile.delete()
+            cleanN = cleanN + 1
+        end if
+    end while
+
+    self.chainIndex = fileN - 1
+    self.dirty = false
+end function
+
+Database.get = function(id)
+    if not self.records.hasIndex(id) then
+        return Error.New("Record not found: " + id, "NOT_FOUND")
+    end if
+    return self.records[id]
+end function
+
+Database.set = function(id, record)
+    if record.hasIndex("public_ip") and record.public_ip.len > 0 then
+        self.ipIndex[record.public_ip] = id
+    end if
+    self.records[id] = record
+    self.dirty = true
+end function
+
+Database.delete = function(id)
+    if not self.records.hasIndex(id) then
+        return Error.New("Record not found: " + id, "NOT_FOUND")
+    end if
+    rec = self.records[id]
+    if rec.hasIndex("public_ip") and self.ipIndex.hasIndex(rec.public_ip) then
+        self.ipIndex.remove(rec.public_ip)
+    end if
+    self.records.remove(id)
+    self.dirty = true
+end function
+
+Database.all = function()
+    result = []
+    for kv in self.records
+        if kv.key != "__continued" then
+            result.push(kv.value)
+        end if
+    end for
+    return result
+end function
+
+Database.query = function(matchFn)
+    result = []
+    for kv in self.records
+        if kv.key != "__continued" then
+            if matchFn(kv.value) then
+                result.push(kv.value)
+            end if
+        end if
+    end for
+    return result
+end function
+
+Database.findByIp = function(ip)
+    if not self.ipIndex.hasIndex(ip) then
+        return null
+    end if
+    id = self.ipIndex[ip]
+    if not self.records.hasIndex(id) then
+        return null
+    end if
+    return self.records[id]
+end function
+
+Database.upsert = function(id, record)
+    if self.records.hasIndex(id) then
+        existing = self.records[id]
+        for kv in record
+            existing[kv.key] = kv.value
+        end for
+        self.set(id, existing)
+    else
+        record.id = id
+        self.set(id, record)
+    end if
+    self.dirty = true
+end function
+
+Database.nextId = function(prefix)
+    self.idCounter = self.idCounter + 1
+    next = str(self.idCounter)
+    while next.len < 3
+        next = "0" + next
+    end while
+    return prefix + "_" + next
+end function
+
+Database.count = function()
+    return self.records.len
+end function
+
+Database.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+Database.New = function(name)
+    result = new Database
+    result.name         = name
+    result.records      = {}
+    result.ipIndex      = {}
+    result.idCounter    = 0
+    result.dirty        = false
+    result.chainIndex   = 1
+    return result
+end function
