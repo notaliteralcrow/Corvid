@@ -1,7 +1,9 @@
 Corvid
+
    (oVo)
   // ^ \\
 C O R V I D
+
 Thought and memory, with wings.
 A persistent, session-aware hacking toolkit for Grey Hack. Corvid replaces the game's default terminal with a unified command shell that accumulates intelligence across sessions, automates exploit workflows, manages bounce networks, and tracks everything you discover.
 
