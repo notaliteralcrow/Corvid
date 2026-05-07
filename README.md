@@ -25,7 +25,8 @@ A persistent, session-aware hacking toolkit for [Grey Hack](https://store.steamp
 - **Scores libraries** — identifies high-value exploit libraries on compromised machines and helps you collect and deploy them strategically
 - **Cracks passwords** — integrated Chainsaw cracker (Markov chain + wordlist) fires automatically during escalation
 
-A full command reference and operational guide is available in the [Corvid Handbook](#) *(coming soon)*.
+A full command reference and operational guide is available in the [Corvid Handbook].
+https://docs.google.com/document/d/1RLnszrNG299tYvo3AUjUK86rcuP3vAiYmpXpg1ml3n0/edit?usp=sharing
 
 ---
 
