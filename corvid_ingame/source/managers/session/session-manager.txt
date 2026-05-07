@@ -1,0 +1,127 @@
+// ============================================================
+// CORVID 2.0 | managers/session/session-manager
+// Manages all sessions. Maintains the session chain for
+// back navigation. Tracks current (operating) session and
+// pivot (home Nest) session separately.
+// ============================================================
+
+SessionManager = {}
+SessionManager.mediator      = null
+SessionManager.sessions      = []
+SessionManager.sessionChain  = []
+SessionManager.currentSession = null
+SessionManager.pivotSession   = null
+
+SessionManager.addSession = function(object, label)
+    session = Session.New(object, label)
+    if session isa Error then
+        return session
+    end if
+    self.sessions.push(session)
+
+    if self.currentSession == null then
+        self.currentSession = session
+        self.sessionChain.push(session)
+    end if
+    if self.pivotSession == null then
+        self.pivotSession = session
+    end if
+    return session
+end function
+
+SessionManager.setCurrentSession = function(indexOrSession)
+    if typeof(indexOrSession) == "number" then
+        if not self.sessions.hasIndex(indexOrSession) then
+            return Error.New("Session index out of range: " + indexOrSession, "OUT_OF_RANGE")
+        end if
+        session = self.sessions[indexOrSession]
+    else
+        session = indexOrSession
+    end if
+    self.currentSession = session
+    self.sessionChain.push(session)
+end function
+
+SessionManager.setPivotSession = function(indexOrSession)
+    if typeof(indexOrSession) == "number" then
+        if not self.sessions.hasIndex(indexOrSession) then
+            return Error.New("Session index out of range: " + indexOrSession, "OUT_OF_RANGE")
+        end if
+        self.pivotSession = self.sessions[indexOrSession]
+    else
+        self.pivotSession = indexOrSession
+    end if
+end function
+
+SessionManager.back = function()
+    if self.sessionChain.len <= 1 then
+        return Error.New("Already at origin session", "AT_ORIGIN")
+    end if
+    // Remove the session we are leaving from the sessions list too
+    leaving = self.sessionChain[self.sessionChain.len - 1]
+    leavingIdx = self.getSessionIndex(leaving)
+    self.sessionChain.pop()
+    self.currentSession = self.sessionChain[self.sessionChain.len - 1]
+    // Remove from sessions list if not session 0 (Nest)
+    if leavingIdx != null and leavingIdx > 0 then
+        self.sessions.remove(leavingIdx)
+    end if
+end function
+
+SessionManager.removeSession = function(index)
+    if not self.sessions.hasIndex(index) then
+        return Error.New("Session index out of range: " + index, "OUT_OF_RANGE")
+    end if
+    self.sessions.remove(index)
+end function
+
+SessionManager.getSessionIndex = function(session)
+    for i in range(0, self.sessions.len - 1)
+        if self.sessions[i] == session then
+            return i
+        end if
+    end for
+    return null
+end function
+
+SessionManager.listSessions = function()
+    return self.sessions
+end function
+
+SessionManager.removeSession = function(id)
+    if not self.sessions.hasIndex(id) then
+        return Error.New("No session at index: " + str(id), "NOT_FOUND")
+    end if
+    removedSession = self.sessions[id]
+    self.sessions.remove(id)
+    // If we removed the current session, fall back to previous in chain
+    if self.currentSession == removedSession then
+        if self.sessionChain.len > 0 then
+            self.currentSession = self.sessionChain[self.sessionChain.len - 1]
+        else
+            self.currentSession = self.pivotSession
+        end if
+    end if
+    // Clean session from chain if present
+    newChain = []
+    for sc in self.sessionChain
+        if sc != removedSession then
+            newChain.push(sc)
+        end if
+    end for
+    self.sessionChain = newChain
+    return true
+end function
+
+SessionManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+SessionManager.New = function()
+    result = new SessionManager
+    result.sessions      = []
+    result.sessionChain  = []
+    result.currentSession = null
+    result.pivotSession   = null
+    return result
+end function

@@ -1,0 +1,1304 @@
+// --- bounce ---// ============================================================
+// RSHELL
+// ============================================================
+
+// --- flock ---
+_cmd = new Command
+_cmd.name = "flock"
+_cmd.description = "Reverse shell management. Subcommands: setup, send, list, wait, deploy, callback"
+_cmd.parameters = [OptionsParameter.New({"name": "subcommand", "required": true, "options": {"list": "list", "adopt": "adopt", "deploy": "deploy", "build": "build", "status": "status"}}), StringParameter.New({"name": "arg", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    metaxManager   = mediator.getExtension("metaxploitManager")
+    sessionManager = mediator.getExtension("sessionManager")
+    configManager  = mediator.getExtension("configManager")
+    dbManager      = mediator.getExtension("databaseManager")
+
+    rshellPort = configManager.get("rshellPort")
+    if rshellPort isa Error then
+        rshellPort = 1222
+    end if
+
+    // ── build ────────────────────────────────────────────────────────────
+    if params.subcommand == "build" then
+        ui.separator()
+        ui.highlight("BUILDING FLOCK CLIENT")
+        ui.separator()
+
+        // Get server IP from local router
+        router = Router.Local()
+        serverIp = ""
+        if not (router isa Error) then
+            serverIp = router.publicIp()
+        end if
+        if serverIp.len == 0 then
+            serverIp = user_input("  Enter your Nest public IP: ").trim
+        end if
+
+        // Get apt repo from config, with fallback
+        configManager = mediator.getExtension("configManager")
+        aptRepo = configManager.get("flockAptRepo")
+        if aptRepo == "" or aptRepo == null then
+            aptRepo = "30.225.197.154"  // Default repo
+        end if
+
+        // Generate flock client source
+        // Phones home to Nest with a disguised process name.
+        // Requires root on target.
+        q = char(34)
+        nl = char(10)
+        srcLines = []
+        srcLines.push("processNames = [" + q + "stick" + q + "," + q + "shiny" + q + "," + q + "grub" + q + "," + q + "wing" + q + "]")
+        srcLines.push("idx = floor(time * 13) % processNames.len")
+        srcLines.push("procName = processNames[idx]")
+        srcLines.push("meta = include_lib(" + q + "/lib/metaxploit.so" + q + ")")
+        srcLines.push("if meta == null then")
+        srcLines.push("    apt = include_lib(" + q + "/lib/aptclient.so" + q + ")")
+        srcLines.push("    if apt != null then")
+        srcLines.push("        apt.add_repo(" + q + aptRepo + q + ")")
+        srcLines.push("        apt.update")
+        srcLines.push("        apt.install(" + q + "metaxploit.so" + q + ")")
+        srcLines.push("        meta = include_lib(" + q + "/lib/metaxploit.so" + q + ")")
+        srcLines.push("    end if")
+        srcLines.push("end" + " if")
+        srcLines.push("if meta == null then")
+        srcLines.push("    exit(" + q + "metaxploit not available" + q + ")")
+        srcLines.push("end" + " if")
+        srcLines.push("meta.rshell_client(" + q + serverIp + q + ", " + str(rshellPort) + ", procName)")
+        src = srcLines.join(nl)
+
+        // Write and compile on Nest
+        pivotHandler = sessionManager.pivotSession.handler
+        pivotComp = pivotHandler.shell.shell.host_computer
+
+        toolsDir = pivotHandler.getFile("/Corvid/tools")
+        if toolsDir isa Error then
+            pivotComp.create_folder("/Corvid", "tools")
+        end if
+
+        pivotComp.touch("/Corvid/tools", "flock-client.src")
+        srcFile = pivotComp.File("/Corvid/tools/flock-client.src")
+        if srcFile == null then
+            return Error.New("Could not create source file", "FILE_ERROR")
+        end if
+        srcFile.set_content(src)
+        ui.success("Source written to /Corvid/tools/flock-client.src")
+
+        ui.info("Compiling...")
+        buildResult = pivotHandler.shell.shell.build("/Corvid/tools/flock-client.src", "/Corvid/tools")
+        if typeof(buildResult) == "string" and buildResult.len > 0 then
+            return Error.New("Build failed: " + buildResult, "BUILD_ERROR")
+        end if
+
+        cbFile = pivotHandler.getFile("/Corvid/tools/flock-client")
+        if cbFile isa Error then
+            return Error.New("Binary not found after build", "BUILD_ERROR")
+        end if
+
+        ui.success("flock-client compiled at /Corvid/tools/flock-client")
+        ui.info("Server: " + serverIp + ":" + str(rshellPort))
+        ui.info("Run: flock deploy  (when on a root session)")
+        ui.separator()
+
+    // ── status ───────────────────────────────────────────────────────────
+    else if params.subcommand == "status" then
+        ui.separator()
+        ui.highlight("FLOCK STATUS")
+        ui.separator()
+
+        router = Router.Local()
+        if router isa Error then
+            ui.warning("Could not check local router: " + router.message)
+        else
+            usedPorts = router.usedPorts()
+            portFound = false
+            for p in usedPorts
+                if p.port_number == rshellPort then
+                    portFound = true
+                end if
+            end for
+            if portFound then
+                ui.success("Port " + str(rshellPort) + " forwarded ✓")
+            else
+                ui.warning("Port " + str(rshellPort) + " NOT forwarded - fix via Browser.exe > router")
+            end if
+            ui.info("Nest public IP: " + router.publicIp())
+        end if
+
+        handler = sessionManager.pivotSession.handler
+        rshellServer = handler.getFile("/usr/bin/rshell-server")
+        if rshellServer isa Error then
+            ui.warning("rshell-server not found in /usr/bin - download from HackShop")
+        else
+            ui.success("rshell-server found ✓")
+        end if
+
+        clientFile = handler.getFile("/Corvid/tools/flock-client")
+        if clientFile isa Error then
+            ui.warning("flock-client not built - run: flock build")
+        else
+            ui.success("flock-client ready ✓")
+        end if
+
+        meta = include_lib("/lib/metaxploit.so")
+        if meta != null then
+            shells = meta.rshell_server()
+            if shells == null or shells.len == 0 then
+                ui.info("Active flock connections: 0")
+            else
+                ui.info("Active flock connections: " + str(shells.len))
+            end if
+        end if
+        ui.separator()
+
+    // ── deploy ───────────────────────────────────────────────────────────
+    // Upload and launch flock-client on current root session.
+    // The client phones home to Nest. Run flock adopt when it arrives.
+    else if params.subcommand == "deploy" then
+        currentSession = sessionManager.currentSession
+        pivotSession   = sessionManager.pivotSession
+
+        if currentSession == pivotSession then
+            return Error.New("Cannot deploy to Nest - must be on a remote root session", "IS_PIVOT")
+        end if
+
+        currentPriv = currentSession.handler.privilege()
+        if currentPriv != "root" then
+            return Error.New("Deploy requires root on current session", "NOT_ROOT")
+        end if
+
+        if not (currentSession.handler isa ShellSession) then
+            return Error.New("Current session must be a shell session", "NOT_SHELL")
+        end if
+
+        pivotHandler = pivotSession.handler
+        cbFile = pivotHandler.getFile("/Corvid/tools/flock-client")
+        if cbFile isa Error then
+            return Error.New("flock-client not built - run: flock build first", "NOT_BUILT")
+        end if
+
+        targetHandler = currentSession.handler
+        targetIp = currentSession.data.ip.public
+
+        ui.separator()
+        ui.highlight("FLOCK DEPLOY — " + targetIp)
+        ui.separator()
+        ui.info("Uploading flock-client to target...")
+
+        uploadPaths = ["/root", "/tmp"]
+        uploadedPath = ""
+        for uploadDir in uploadPaths
+            scpResult = pivotHandler.shell.shell.scp("/Corvid/tools/flock-client", uploadDir, targetHandler.shell.shell)
+            if typeof(scpResult) != "string" or scpResult.len == 0 then
+                uploadedPath = uploadDir + "/flock-client"
+                ui.success("Uploaded to " + uploadedPath)
+                break
+            end if
+            ui.dim("  " + uploadDir + " failed - trying next...")
+        end for
+
+        if uploadedPath.len == 0 then
+            return Error.New("Upload failed on all paths", "UPLOAD_ERROR")
+        end if
+
+        ui.info("Launching flock-client...")
+        targetHandler.shell.shell.launch(uploadedPath)
+        ui.success("flock-client launched on " + targetIp)
+        ui.info("Target will phone home. Run: flock adopt  when ready.")
+        ui.separator()
+
+    // ── list ─────────────────────────────────────────────────────────────
+    else if params.subcommand == "list" then
+        ui.separator()
+        ui.highlight("ACTIVE FLOCK CONNECTIONS")
+        ui.separator()
+
+        meta = include_lib("/lib/metaxploit.so")
+        if meta == null then
+            ui.warning("metaxploit.so not available")
+            return
+        end if
+
+        shells = meta.rshell_server()
+        if shells == null or shells.len == 0 then
+            ui.warning("No active flock connections")
+            return
+        end if
+
+        for i in range(0, shells.len - 1)
+            sh = shells[i]
+            priv = "unknown"
+            shIp = "unknown"
+            if typeof(sh) == "shell" then
+                comp = sh.host_computer
+                if comp != null then
+                    shIp = comp.local_ip
+                    pubIp = comp.public_ip
+                    if pubIp != shIp then
+                        shIp = pubIp + " / " + shIp
+                    end if
+                end if
+            end if
+            ui.info("[" + str(i) + "] " + shIp)
+        end for
+        ui.separator()
+
+    // ── adopt ────────────────────────────────────────────────────────────
+    // List active flock connections and adopt one as a Corvid session
+    else if params.subcommand == "adopt" then
+        meta = include_lib("/lib/metaxploit.so")
+        if meta == null then
+            ui.warning("metaxploit.so not available")
+            return
+        end if
+
+        shells = meta.rshell_server()
+        if shells == null or shells.len == 0 then
+            ui.warning("No active flock connections - send Funny Game first")
+            return
+        end if
+
+        ui.separator()
+        ui.highlight("ACTIVE FLOCK CONNECTIONS")
+        ui.separator()
+        for i in range(0, shells.len - 1)
+            sh = shells[i]
+            shIp = "unknown"
+            if typeof(sh) == "shell" then
+                comp = sh.host_computer
+                if comp != null then
+                    pubIp = comp.public_ip
+                    locIp = comp.local_ip
+                    if pubIp != locIp then
+                        shIp = pubIp + " / " + locIp
+                    else
+                        shIp = pubIp
+                    end if
+                end if
+            end if
+            ui.info("  [" + str(i) + "]  " + shIp)
+        end for
+        ui.print("")
+
+        idxStr = params.arg.trim
+        if idxStr.len == 0 then
+            idxStr = user_input("  Adopt which connection (0-" + str(shells.len - 1) + ", enter to cancel): ").trim
+        end if
+        if idxStr.len == 0 then
+            return
+        end if
+
+        idx = idxStr.val
+        if idx < 0 or idx >= shells.len then
+            ui.warning("Invalid index: " + idxStr)
+            return
+        end if
+
+        sh = shells[idx]
+        if typeof(sh) != "shell" then
+            ui.warning("Connection " + idxStr + " is not a valid shell")
+            return
+        end if
+
+        comp   = sh.host_computer
+        connIp = "unknown"
+        if comp != null then
+            pubIp = comp.public_ip
+            locIp = comp.local_ip
+            if pubIp != locIp then
+                connIp = pubIp + " / " + locIp
+            else
+                connIp = pubIp
+            end if
+        end if
+
+        label      = connIp + " [flock]"
+        newSession = sessionManager.addSession(sh, label)
+        if newSession isa Error then
+            ui.warning("Could not adopt session: " + newSession.message)
+            return
+        end if
+        sessionManager.setCurrentSession(newSession)
+        ui.success("Session adopted: " + label)
+        ui.info("Run: roost convert  to register as a persistent roost node")
+        ui.info("Run: leave  when done")
+        ui.separator()
+
+    // ── deploy (legacy - deploy rshell_client from current session) ───────
+    else if params.subcommand == "deploy" then
+        router   = Router.Local()
+        serverIp = params.arg
+        if serverIp.len == 0 then
+            if not (router isa Error) then
+                serverIp = router.publicIp()
+            end if
+        end if
+        processName = user_input("Process name (default: dsession): ")
+        if processName.len == 0 then
+            processName = "dsession"
+        end if
+        meta = include_lib("/lib/metaxploit.so")
+        if meta == null then
+            ui.warning("metaxploit.so not available")
+            return
+        end if
+        meta.rshell_client(serverIp, rshellPort, processName)
+        ui.success("Rshell client deployed -> " + serverIp + ":" + str(rshellPort))
+        ui.info("Run: flock list  to adopt the incoming connection")
+    end if
+end function
+commandManager.register(_cmd)
+
+// ============================================================
+// MACRO
+// ============================================================
+
+// --- macro ---
+_cmd = new Command
+_cmd.name = "macro"
+_cmd.description = "Macro management. Subcommands: run list"
+_cmd.parameters = [OptionsParameter.New({"name": "subcommand", "required": true,"options": {"run": "run", "list": "list"}}),StringParameter.New({"name": "name", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+        ui           = mediator.getExtension("corvidUi")
+        macroManager = mediator.getExtension("macroManager")
+
+        if params.subcommand == "list" then
+            names = macroManager.listMacros()
+            if names.len == 0 then
+                ui.warning("No macros found in /Config/Macros/")
+                return
+            end if
+            for name in names
+                ui.print("  " + name)
+            end for
+
+        else if params.subcommand == "run" then
+            if params.name.len == 0 then
+                return Error.New("Provide a macro name", "MISSING_PARAM")
+            end if
+            result = macroManager.runMacro(params.name)
+            if result isa Error then
+                return result
+            end if
+        end if
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// ALIASES / VARIABLES
+// ============================================================
+
+// --- alias ---
+_cmd = new Command
+_cmd.name = "alias"
+_cmd.description = "Add a command alias"
+_cmd.parameters = [StringParameter.New({"name": "alias",  "required": true}),RestParameter.New({"name":   "target", "required": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension("corvidUi")
+        commandManager = mediator.getExtension("commandManager")
+        configManager  = mediator.getExtension("configManager")
+        commandManager.addAlias(params.alias, params.target)
+        // Persist to config
+        aliases = configManager.get("aliases")
+        if aliases isa Error then
+            aliases = {}
+        end if
+        aliases[params.alias] = params.target
+        configManager.set("aliases", aliases)
+        ui.success("Alias added: " + params.alias + " -> " + params.target)
+    end function
+commandManager.register(_cmd)
+
+// --- aliases ---
+_cmd = new Command
+_cmd.name = "aliases"
+_cmd.description = "List all current aliases"
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension("corvidUi")
+        commandManager = mediator.getExtension("commandManager")
+        if commandManager.aliases.len == 0 then
+            ui.warning("No aliases defined")
+            return
+        end if
+        for kv in commandManager.aliases
+            ui.print("  " + kv.key + "  ->  " + kv.value)
+        end for
+    end function
+commandManager.register(_cmd)
+
+// --- unalias ---
+_cmd = new Command
+_cmd.name = "unalias"
+_cmd.description = "Remove an alias"
+_cmd.parameters = [StringParameter.New({"name": "alias", "required": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension("corvidUi")
+        commandManager = mediator.getExtension("commandManager")
+        configManager  = mediator.getExtension("configManager")
+        commandManager.removeAlias(params.alias)
+        aliases = configManager.get("aliases")
+        if not (aliases isa Error) and aliases.hasIndex(params.alias) then
+            aliases.remove(params.alias)
+            configManager.set("aliases", aliases)
+        end if
+        ui.success("Alias removed: " + params.alias)
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// THEME
+// ============================================================
+
+// --- theme ---
+_cmd = new Command
+_cmd.name = "theme"
+_cmd.description = "Set a theme color. Slots: highlight text secondary success warning info danger error"
+_cmd.parameters = [OptionsParameter.New({"name": "slot", "required": true,"options": {"highlight": "highlight", "text": "text","secondary": "secondary", "success": "success","warning": "warning", "info": "info","danger": "danger", "error": "error"}}),StringParameter.New({"name": "hex", "required": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+        ui           = mediator.getExtension("corvidUi")
+        themeManager = mediator.getExtension("themeManager")
+        themeManager.setColor(params.slot, params.hex)
+        ui.success("Theme updated: " + params.slot + " = " + params.hex)
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// HISTORY & HELP
+// ============================================================
+
+// --- history ---
+_cmd = new Command
+_cmd.name = "history"
+_cmd.description = "Show command history"
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension("corvidUi")
+        commandManager = mediator.getExtension("commandManager")
+        if commandManager.history.len == 0 then
+            ui.warning("No command history")
+            return
+        end if
+        ui.history(commandManager.history)
+    end function
+commandManager.register(_cmd)
+
+// --- help ---
+_cmd = new Command
+_cmd.name = "help"
+_cmd.description = "Show all commands and their usage"
+_cmd.parameters = [StringParameter.New({"name": "command", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension("corvidUi")
+        commandManager = mediator.getExtension("commandManager")
+        sessionManager = mediator.getExtension("sessionManager")
+        handler        = sessionManager.currentSession.handler
+
+        cmdList = []
+        for kv in commandManager.commands
+            cmd = kv.value
+            if cmd == null then
+                continue
+            end if
+            hasPerms = not (commandManager.checkPermissions(cmd) isa Error)
+            entry = {}
+            entry.name        = cmd.name
+            entry.description = cmd.description
+            entry.parameters  = cmd.parameters
+            entry.hasPermissions = hasPerms
+            cmdList.push(entry)
+        end for
+
+        if params.command.len > 0 then
+            found = null
+            for entry in cmdList
+                if entry.name == params.command then
+                    found = entry
+                end if
+            end for
+            if found == null then
+                return Error.New("Unknown command: " + params.command, "UNKNOWN_COMMAND")
+            end if
+            ui.separator()
+            ui.highlight(found.name)
+            ui.print("  " + found.description)
+            paramStr = ""
+            for p in found.parameters
+                if p.type == "flag" then
+                    paramStr = paramStr + "(" + p.flag + ") "
+                else if p.required then
+                    paramStr = paramStr + "[" + p.name + "] "
+                else
+                    paramStr = paramStr + "(" + p.name + ") "
+                end if
+            end for
+            trimmedParams = paramStr.trim
+            if paramStr.len > 0 then
+                ui.info("Usage: " + found.name + " " + trimmedParams)
+            end if
+            ui.separator()
+            return
+        end if
+
+        ui.help(cmdList)
+    end function
+commandManager.register(_cmd)
+
+// --- clear ---
+_cmd = new Command
+_cmd.name = "clear"
+_cmd.description = "Clear the terminal"
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+        clear_screen
+    end function
+commandManager.register(_cmd)
+
+// --- exit ---
+_cmd = new Command
+_cmd.name = "exit"
+_cmd.description = "Save and exit Corvid (asks for confirmation)"
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+        ui        = mediator.getExtension("corvidUi")
+        dbManager = mediator.getExtension("databaseManager")
+        ui.separator()
+        confirm = user_input("  Exit Corvid? (yes/no): ").trim.lower
+        if confirm == "yes" or confirm == "y" then
+            dbManager.save()
+            exit("Goodbye.")
+        else
+            ui.info("Exit cancelled.")
+        end if
+    end function
+commandManager.register(_cmd)
+
+// --- findlib ---
+
+// ============================================================
+// CLOSE FUNCTION
+// ============================================================
+
+// --- launch ---
+_cmd = new Command
+_cmd.name = "launch"
+_cmd.description = "Launch an executable. Aliases: browser, mail, fileexplorer(fe), adminmonitor(am), codeeditor(ce), routerinterface(ri), employeesviewer(ev), studentsviewer(sv), policerecord(pr)"
+_cmd.parameters = [StringParameter.New({"name": "path", "required": true}), RestParameter.New({"name": "args", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    sessionManager = mediator.getExtension("sessionManager")
+    ui             = mediator.getExtension("corvidUi")
+    handler        = sessionManager.currentSession.handler
+
+    rawPath = params.path.trim
+    launchArgs = params.args
+
+    // ── Alias resolution ─────────────────────────────────────────────────
+    // Translate short aliases to real binary names before path search
+    prog = rawPath.lower
+    if prog == "browser" or prog == "b" then
+        rawPath = "Browser.exe"
+    else if prog == "mail" or prog == "m" then
+        rawPath = "Mail.exe"
+    else if prog == "fileexplorer" or prog == "fe" or prog == "explorer" then
+        rawPath = "FileExplorer.exe"
+    else if prog == "adminmonitor" or prog == "am" then
+        rawPath = "AdminMonitor.exe"
+    else if prog == "logviewer" or prog == "lv" then
+        rawPath = "LogViewer.exe"
+    else if prog == "codeeditor" or prog == "ce" or prog == "editor" then
+        rawPath = "CodeEditor.exe"
+    else if prog == "routerinterface" or prog == "ri" then
+        rawPath = "Browser.exe"
+        if launchArgs.len == 0 then
+            launchArgs = "192.168.0.1:8080"
+        end if
+    else if prog == "employeesviewer" or prog == "ev" then
+        rawPath = "EmployeesViewer.exe"
+    else if prog == "studentsviewer" or prog == "sv" then
+        rawPath = "StudentsViewer.exe"
+    else if prog == "policerecord" or prog == "pr" then
+        rawPath = "PoliceRecord.exe"
+    end if
+
+    // ── Path search ───────────────────────────────────────────────────────
+    // Try given path, then current dir, then common system locations
+    launchPath = rawPath
+    file = handler.getFile(launchPath)
+    if file isa Error then
+        // Extract just the binary name for fallback search
+        binName = rawPath
+        if binName.indexOf("/") != null then
+            parts = binName.split("/")
+            binName = parts[parts.len - 1]
+        end if
+        searchDirs = ["/usr/bin", "/bin", "/root", "/root/Desktop", "/root/Downloads", "/home/guest"]
+        for sd in searchDirs
+            f2 = handler.getFile(sd + "/" + binName)
+            if not (f2 isa Error) then
+                launchPath = sd + "/" + binName
+                file = f2
+                break
+            end if
+        end for
+        if file isa Error then
+            return Error.New("File not found: " + rawPath + " (searched /usr/bin, /bin, /root, /root/Desktop, /root/Downloads, /home/guest)", "NOT_FOUND")
+        end if
+    end if
+
+    // If it is a text file, use cat instead
+    if file.type() == FILE_TYPES.FILE and not file.isBinary() then
+        rawContent = file.content()
+        if rawContent isa Error then
+            return rawContent
+        end if
+        ui.print(rawContent)
+        return
+    end if
+    result = handler.launch(launchPath, launchArgs)
+    if result isa Error then
+        return result
+    end if
+    if result != null then
+        ui.print(str(result))
+    end if
+end function
+commandManager.register(_cmd)
+
+// --- log ---
+_cmd = new Command
+_cmd.name = "log"
+_cmd.description = "View system.log on the current machine"
+_cmd.parameters = [StringParameter.New({"name": "path", "required": false, "default": "/var/system.log"})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    sessionManager = mediator.getExtension("sessionManager")
+    ui             = mediator.getExtension("corvidUi")
+    handler        = sessionManager.currentSession.handler
+    file = handler.getFile(params.path)
+    if file isa Error then
+        return file
+    end if
+    content = file.content()
+    if content isa Error then
+        return content
+    end if
+    if content.len == 0 then
+        ui.success("Log is empty.")
+        return
+    end if
+    ui.separator()
+    ui.print(content)
+    ui.separator()
+end function
+commandManager.register(_cmd)
+
+// --- blight ---
+_cmd = new Command
+_cmd.name = "blight"
+_cmd.description = "Build and deploy rot log-corruption loop. Subcommands: build deploy"
+_cmd.parameters = [StringParameter.New({"name": "subcommand", "required": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    sub            = params.subcommand.trim.lower
+
+    pivotSession = sessionManager.pivotSession
+    pivotHandler = pivotSession.handler
+    pivotShell   = pivotHandler.shell.shell
+
+    // ── build ─────────────────────────────────────────────────────────────
+    if sub == "build" then
+        ui.separator()
+        ui.highlight("BLIGHT BUILD")
+        ui.separator()
+
+        srcFile = pivotHandler.getFile("/Corvid/tools/rot.src")
+        if srcFile isa Error then
+            return Error.New("rot.src not found at /Corvid/tools/rot.src - copy from Corvid source zip", "SRC_MISSING")
+        end if
+
+        existingBin = pivotHandler.getFile("/Corvid/tools/rot")
+        if not (existingBin isa Error) then
+            existingBin.delete()
+        end if
+
+        ui.info("Compiling rot.src on Nest...")
+        buildResult = pivotShell.build("/Corvid/tools/rot.src", "/Corvid/tools")
+        if typeof(buildResult) == "string" and buildResult.len > 0 then
+            return Error.New("Build failed: " + buildResult, "BUILD_FAILED")
+        end if
+
+        builtBin = pivotHandler.getFile("/Corvid/tools/rot")
+        if builtBin isa Error then
+            return Error.New("Binary not found after build", "BUILD_FAILED")
+        end if
+
+        ui.success("rot built at /Corvid/tools/rot")
+        ui.info("Run: blight deploy  from a root session to deploy")
+        ui.separator()
+
+    // ── deploy ────────────────────────────────────────────────────────────
+    else if sub == "deploy" then
+        ui.separator()
+        ui.highlight("BLIGHT DEPLOY")
+        ui.separator()
+
+        currentSession = sessionManager.currentSession
+        if currentSession == pivotSession then
+            return Error.New("Cannot deploy blight on Nest - switch to a target session first", "IS_NEST")
+        end if
+
+        if not (currentSession.handler isa ShellSession) then
+            return Error.New("Current session must be a shell session", "NOT_SHELL")
+        end if
+
+        if currentSession.handler.privilege() != "root" then
+            return Error.New("Root access required to deploy blight", "NOT_ROOT")
+        end if
+
+        targetIp   = currentSession.data.ip.public
+        targetShell = currentSession.handler.shell.shell
+        targetComp  = targetShell.host_computer
+
+        // Check binary exists on Nest
+        rotBin = pivotHandler.getFile("/Corvid/tools/rot")
+        if rotBin isa Error then
+            return Error.New("rot binary not found - run: blight build first", "BIN_MISSING")
+        end if
+
+        // Ensure /shiny exists on target
+        shinyDir = targetComp.File("/shiny")
+        if shinyDir == null then
+            targetComp.create_folder("/", "shiny")
+        end if
+
+        // Upload rot binary
+        ui.info("Uploading rot to " + targetIp + "...")
+        scpRes = pivotShell.scp("/Corvid/tools/rot", "/shiny", targetShell)
+        if typeof(scpRes) == "string" and scpRes.len > 0 then
+            return Error.New("Upload failed: " + scpRes, "UPLOAD_FAILED")
+        end if
+        ui.success("Uploaded /shiny/rot")
+
+        // Launch via /bin/bash for non-blocking execution
+        // /bin/bash may avoid the disconnect log entry that connect_service creates
+        targetShell.launch("/bin/bash", "/shiny/rot")
+        ui.success("rot launched on " + targetIp)
+        ui.info("Binary self-deletes immediately, then runs " + str(4) + " corruption cycles")
+        ui.info("Safe to leave now")
+        ui.separator()
+
+    else
+        return Error.New("Unknown subcommand. Use: blight build  or  blight deploy", "UNKNOWN_SUB")
+    end if
+
+end function
+commandManager.register(_cmd)
+
+// --- reboot ---
+_cmd = new Command
+_cmd.name = "reboot"
+_cmd.description = "Wipe log then send reboot to target. Polls for session death and exits cleanly."
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+
+    currentSession = sessionManager.currentSession
+    pivotSession   = sessionManager.pivotSession
+
+    // Never reboot the Nest
+    if currentSession == pivotSession then
+        return Error.New("Cannot reboot your Nest", "IS_PIVOT")
+    end if
+    if not (currentSession.handler isa ShellSession) then
+        return Error.New("reboot requires a shell session", "NOT_SHELL")
+    end if
+
+    handler = currentSession.handler
+    ip      = currentSession.data.ip.public
+    lbl     = currentSession.label
+
+    ui.separator()
+    ui.highlight("REBOOT " + ip)
+    ui.separator()
+
+    confirm = user_input("  Reboot " + ip + "? This will close your session. (yes/no): ").trim
+    if confirm != "yes" and confirm != "y" then
+        ui.info("Reboot cancelled.")
+        return
+    end if
+
+    // Wipe log first if root
+    if handler.privilege() == "root" then
+        ui.info("Wiping log...")
+        wipeResult = handler.corruptLogs()
+        if not (wipeResult isa Error) then
+            ui.success("Log wiped.")
+        else
+            ui.warning("Log wipe failed: " + wipeResult.message)
+        end if
+    else
+        ui.warning("Not root - log cannot be wiped before reboot.")
+    end if
+
+    // Send reboot via launch
+    ui.info("Sending reboot command to " + ip + "...")
+    rawShell = handler.shell.shell
+    rawShell.launch("/bin/reboot", "")
+
+    // Poll for session death (5 seconds)
+    ui.info("Waiting for session to close...")
+    pollCount = 0
+    sessionDied = false
+    while pollCount < 5
+        wait(1)
+        testPriv = handler.privilege()
+        if typeof(testPriv) != "string" then
+            sessionDied = true
+            break
+        end if
+        if testPriv == "none" or testPriv == "" then
+            sessionDied = true
+            break
+        end if
+        pollCount = pollCount + 1
+    end while
+
+    // Clean exit back to previous session
+    sessionManager.back()
+    dbManager.save()
+
+    if sessionDied then
+        ui.success("Reboot confirmed - session on " + ip + " is gone.")
+    else
+        ui.warning("Session still alive after 5s - reboot may not have fired.")
+        ui.info("Check with: sessions")
+    end if
+    ui.success("Now on: " + sessionManager.currentSession.label)
+    ui.separator()
+end function
+commandManager.register(_cmd)
+// --- find ---
+_cmd = new Command
+_cmd.name = "find"
+_cmd.description = "Search for a file by name recursively from given path"
+_cmd.parameters = [StringParameter.New({"name": "path", "required": true}), StringParameter.New({"name": "name", "required": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    sessionManager = mediator.getExtension("sessionManager")
+    ui             = mediator.getExtension("corvidUi")
+    handler        = sessionManager.currentSession.handler
+    theme          = mediator.getExtension("themeManager")
+
+    searchName = params.name
+    results    = []
+
+    scanDir = function(file)
+        if file isa Error then
+            return
+        end if
+        if file.name() == searchName then
+            results.push(file.path())
+        end if
+        if file.type() == FILE_TYPES.FOLDER then
+            kids = file.children()
+            if kids isa Error then
+                return
+            end if
+            for kid in kids
+                scanDir(kid)
+            end for
+        end if
+    end function
+
+    startFile = handler.getFile(params.path)
+    if startFile isa Error then
+        return startFile
+    end if
+    scanDir(startFile)
+
+    if results.len == 0 then
+        ui.warning("Not found: " + searchName)
+        return
+    end if
+    for r in results
+        ui.print(theme.success(r))
+    end for
+end function
+commandManager.register(_cmd)
+
+
+// --- sudo ---
+_cmd = new Command
+_cmd.name = "sudo"
+_cmd.description = "Show credentials for a user to use with the game sudo (-s for root, -u username for other user)"
+_cmd.parameters = [StringParameter.New({"name": "flag", "required": true}), StringParameter.New({"name": "username", "required": false, "default": "root"}), StringParameter.New({"name": "password", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    sessionManager = mediator.getExtension("sessionManager")
+    ui             = mediator.getExtension("corvidUi")
+    dbManager      = mediator.getExtension("databaseManager")
+    handler        = sessionManager.currentSession.handler
+    ip             = sessionManager.currentSession.data.ip
+
+    targetUser = "root"
+    password   = params.password
+
+    if params.flag == "-s" then
+        targetUser = "root"
+        if password.len == 0 then
+            creds = dbManager.findCredentialsByIp(ip.public)
+            for cred in creds
+                if cred.username == "root" and cred.password.len > 0 then
+                    password = cred.password
+                end if
+            end for
+        end if
+        if password.len == 0 then
+            creds = dbManager.findCredentialsByIp(ip.local)
+            for cred in creds
+                if cred.username == "root" and cred.password.len > 0 then
+                    password = cred.password
+                end if
+            end for
+        end if
+        if password.len == 0 then
+            allCreds = dbManager.findCredentials("root")
+            for cred in allCreds
+                if cred.username == "root" and cred.password.len > 0 then
+                    password = cred.password
+                end if
+            end for
+        end if
+        if password.len == 0 then
+            return Error.New("No root password in database. Run harvest first.", "NO_PASSWORD")
+        end if
+
+    else if params.flag == "-u" then
+        targetUser = params.username
+        if targetUser.len == 0 then
+            return Error.New("sudo -u requires a username", "MISSING_PARAM")
+        end if
+        if password.len == 0 then
+            // Search by public IP first
+            creds = dbManager.findCredentialsByIp(ip.public)
+            for cred in creds
+                if cred.username == targetUser and cred.password.len > 0 then
+                    password = cred.password
+                end if
+            end for
+        end if
+        if password.len == 0 then
+            // Try LAN IP
+            creds = dbManager.findCredentialsByIp(ip.local)
+            for cred in creds
+                if cred.username == targetUser and cred.password.len > 0 then
+                    password = cred.password
+                end if
+            end for
+        end if
+        if password.len == 0 then
+            // Last resort: search all credentials by username
+            allCreds = dbManager.findCredentials(targetUser)
+            for cred in allCreds
+                if cred.username == targetUser and cred.password.len > 0 then
+                    password = cred.password
+                end if
+            end for
+        end if
+        if password.len == 0 then
+            return Error.New("No password found for: " + targetUser + ". Run harvest first or provide: sudo -u " + targetUser + " [password]", "NO_PASSWORD")
+        end if
+
+    else
+        return Error.New("Use: sudo -s  or  sudo -u [username]", "UNKNOWN_FLAG")
+    end if
+
+    // Try GCO first - works from guest and user, no SSH port required
+    ui.info("Trying Clover Method...")
+    rawShellSudo = handler.shell.shell
+    wpSudo = findWritePerms(rawShellSudo)
+    if wpSudo != null then
+        qSudo = char(34)
+        sudoSrcSudo = "cob = get_custom_object" + char(10)
+        sudoSrcSudo = sudoSrcSudo + "cob.shell = get_shell(" + qSudo + targetUser + qSudo + ", " + qSudo + password + qSudo + ")"
+        rawShellSudo.host_computer.touch(wpSudo.path, "csudo.src")
+        sudoFileSudo = rawShellSudo.host_computer.File(wpSudo.path + "/csudo.src")
+        if sudoFileSudo != null then
+            sudoFileSudo.set_content(sudoSrcSudo)
+            buildResSudo = rawShellSudo.build(wpSudo.path + "/csudo.src", wpSudo.path)
+            if buildResSudo.len == 0 then
+                rawShellSudo.launch(wpSudo.path + "/csudo")
+                cobSudo = get_custom_object
+                if cobSudo.hasIndex("shell") and typeof(cobSudo.shell) == "shell" then
+                    sudoShell = cobSudo.shell
+                    for sudoClean in ["csudo.src", "csudo"]
+                        sudoCleanF = rawShellSudo.host_computer.File(wpSudo.path + "/" + sudoClean)
+                        if sudoCleanF != null then
+                            sudoCleanF.delete()
+                        end if
+                    end for
+                    newSessionSudo = sessionManager.addSession(sudoShell, targetUser + "@" + ip.public)
+                    if not (newSessionSudo isa Error) then
+                        sessionManager.setCurrentSession(newSessionSudo)
+                        credUpdateSudo = {}
+                        credUpdateSudo.type      = CRED_TYPES.SYSTEM
+                        credUpdateSudo.username  = targetUser
+                        credUpdateSudo.password  = password
+                        credUpdateSudo.public_ip = ip.public
+                        credUpdateSudo.lan_ip    = ip.local
+                        credUpdateSudo.source    = "sudo_escalation"
+                        dbManager.upsertCredential(credUpdateSudo)
+                        dbManager.save()
+                        ui.success("Switched to " + targetUser + " via Clover Method.")
+                        return
+                    end if
+                end if
+                // Clean up if GCO returned no shell
+                for sudoClean2 in ["csudo.src", "csudo"]
+                    sudoCleanF2 = rawShellSudo.host_computer.File(wpSudo.path + "/" + sudoClean2)
+                    if sudoCleanF2 != null then
+                        sudoCleanF2.delete()
+                    end if
+                end for
+            else
+                // Build failed - clean up src
+                deadSudoSrc = rawShellSudo.host_computer.File(wpSudo.path + "/csudo.src")
+                if deadSudoSrc != null then
+                    deadSudoSrc.delete()
+                end if
+            end if
+        end if
+    end if
+
+    // GCO not available or failed - fall back to SSH
+    ui.info("GCO unavailable - trying SSH as " + targetUser + "...")
+    sshResult = handler.shell.shell.connect_service(ip.public, 22, targetUser, password, "ssh")
+    if typeof(sshResult) == "shell" then
+        newSession = sessionManager.addSession(sshResult, targetUser + "@" + ip.public)
+        if newSession isa Error then
+            return newSession
+        end if
+        sessionManager.setCurrentSession(newSession)
+        ui.success("Switched to " + targetUser + " via SSH.")
+        return
+    end if
+
+    // Both GCO and SSH failed - print password for manual use
+    ui.warning("Auto-sudo failed. Use the game terminal manually:")
+    ui.print("")
+    ui.print("  sudo -s")
+    ui.print("  Password: " + password)
+    ui.print("")
+    ui.info("Or from your Nest: ssh " + targetUser + "@" + ip.public + " pass: " + password)
+end function
+commandManager.register(_cmd)
+
+// --- close ---
+_cmd = new Command
+_cmd.name = "close"
+_cmd.description = "Close a session by id. Omit id to close current session and return to previous"
+_cmd.parameters = [StringParameter.New({"name": "id", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    sessionManager = mediator.getExtension("sessionManager")
+    ui             = mediator.getExtension("corvidUi")
+
+    if params.id.val == null then
+        // Close current session and go back
+        result = sessionManager.back()
+        if result isa Error then
+            return result
+        end if
+        ui.success("Session closed. Returned to: " + sessionManager.currentSession.label)
+        return
+    end if
+
+    // Close a specific session by id
+    sessions = sessionManager.listSessions()
+    if not sessions.hasIndex(params.id.val) then
+        return Error.New("No session at index: " + str(params.id.val), "NOT_FOUND")
+    end if
+
+    // Cannot close session 0 (Nest)
+    if params.id.val == 0 then
+        return Error.New("Cannot close the Nest session (session 0)", "PROTECTED")
+    end if
+
+    result = sessionManager.removeSession(params.id.val)
+    if result isa Error then
+        return result
+    end if
+    ui.success("Session " + str(params.id.val) + " closed.")
+end function
+commandManager.register(_cmd)
+// monitor command removed - AdminMonitor runs on Nest only, not targets
+
+// --- leave ---
+_cmd = new Command
+_cmd.name = "leave"
+_cmd.description = "Return to Nest. Closes all sessions. Use 'leave wipe' to also attempt log corruption on each session."
+_cmd.parameters = [StringParameter.New({"name": "mode", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+    mode           = params.mode.trim().lower()
+
+    if mode == "wipe" then
+        // Full cleanup with log wipe attempts
+        doLeave("wipe")
+    else
+        // Simple: close all sessions and return to Nest
+        ui.separator()
+        ui.info("Returning to Nest...")
+
+        // Close all sessions except Nest (index 0)
+        sessionManager.sessions = [sessionManager.sessions[0]]
+        sessionManager.sessionChain = [sessionManager.sessions[0]]
+        sessionManager.currentSession = sessionManager.sessions[0]
+
+        dbManager.save()
+        ui.success("Back on Nest.")
+        ui.separator()
+    end if
+end function
+commandManager.register(_cmd)
+
+
+// --- destroy ---
+_cmd = new Command
+_cmd.name = "destroy"
+_cmd.description = "SCORCHED EARTH. Wipe log, delete /boot, reboot target. Permanently bricks the machine. Requires root. Hard-blocked on Nest and roost nodes."
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "root"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+
+    currentSession = sessionManager.currentSession
+    pivotSession   = sessionManager.pivotSession
+
+    // Hard block: never destroy Nest
+    if currentSession == pivotSession then
+        return Error.New("Cannot destroy your Nest", "IS_PIVOT")
+    end if
+
+    if not (currentSession.handler isa ShellSession) then
+        return Error.New("destroy requires a shell session", "NOT_SHELL")
+    end if
+
+    ip = currentSession.data.ip
+    lanIp = ip.local
+
+    // Hard block: never destroy a roost node
+    roostNode = dbManager.roostDb.find(ip.public)
+    if roostNode != null then
+        return Error.New("Cannot destroy a roost node - use: roost nuke", "IS_ROOST")
+    end if
+
+    // Hard block: never destroy a bounce node
+    bounces = dbManager.findBounces()
+    for b in bounces
+        if b.public_ip == ip.public then
+            return Error.New("Cannot destroy a bounce node - remove from pool first", "IS_BOUNCE")
+        end if
+    end for
+
+    ui.separator()
+    ui.error("DESTROY -- SCORCHED EARTH")
+    ui.separator()
+    ui.warning("This will permanently brick: " + ip.public + " / " + lanIp)
+    ui.warning("The machine will be unrecoverable.")
+    ui.print("")
+
+    confirm = user_input("  Type the target LAN IP to confirm: ").trim()
+    if confirm != lanIp then
+        ui.info("Cancelled.")
+        return
+    end if
+
+    handler = currentSession.handler
+
+    // Wipe log first
+    ui.info("Wiping log...")
+    handler.corruptLogs()
+
+    // Delete /boot to brick the machine
+    ui.info("Deleting /boot...")
+    bootDir = handler.getFile("/boot")
+    if not (bootDir isa Error) then
+        bootDir.delete()
+        ui.success("  /boot deleted")
+    end if
+
+    // Back out to previous session BEFORE rebooting
+    // Rebooting first kills the session and can crash Corvid
+    sessionManager.back()
+    dbManager.targetDb.setStatus(ip.public, "unknown")
+    dbManager.save()
+
+    // Now send reboot to the dead session's raw shell
+    ui.info("Rebooting target...")
+    handler.shell.shell.launch("/bin/reboot")
+
+    ui.success("Target destroyed. Now on: " + sessionManager.currentSession.label)
+    ui.separator()
+end function
+commandManager.register(_cmd)
+

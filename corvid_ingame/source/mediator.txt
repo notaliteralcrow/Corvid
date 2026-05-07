@@ -1,0 +1,29 @@
+// ============================================================
+// CORVID 2.0 | mediator
+// ExtensionMediator  -  the central communication broker.
+// All managers register here and communicate through here.
+// No manager ever holds a direct reference to another.
+// ============================================================
+
+ExtensionMediator = {}
+ExtensionMediator.extensions = {}
+ExtensionMediator.addExtension = function(name, extension)
+    self.extensions[name] = extension
+    if extension != null then
+        extension.setMediator(self)
+    end if
+end function
+ExtensionMediator.getExtension = function(name)
+    if not self.extensions.hasIndex(name) then
+        return null
+    end if
+    return self.extensions[name]
+end function
+ExtensionMediator.removeExtension = function(name)
+    self.extensions.remove(name)
+end function
+ExtensionMediator.New = function()
+    result = new ExtensionMediator
+    result.extensions = {}
+    return result
+end function

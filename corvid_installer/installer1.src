@@ -1,0 +1,3997 @@
+s = get_shell;c = s.host_computer;m = function(filePath, content, isNew);    segments = filePath.split("/")[1:];    fileName = segments.pop;    for segment in segments;        __segment_idx = segments.indexOf(segment);        parentPath = "/" + segments[:__segment_idx].join("/");        if parentPath == "/" then;            folderPath = "/" + segment;        else;            folderPath = parentPath + "/" + segment;        end if;        folderHandle = c.File(folderPath);        if folderHandle == null then;            result = c.create_folder(parentPath, segment);            if result != 1 then;                exit("Could not create folder: " + folderPath);            end if;        end if;    end for;    parentPath = "/" + segments.join("/");    fileEntity = c.File(filePath);    if fileEntity == null then;        result = c.touch(parentPath, fileName);        if result != 1 then;            exit("Could not create file: " + filePath);        end if;        fileEntity = c.File(filePath);    end if;    if isNew then;        fileEntity.set_content(content);        print("Written: " + filePath);    else;        fileEntity.set_content(fileEntity.get_content + content);        print("Appended: " + filePath);    end if;end function
+m("/Corvid/asriN/managers/database/exploit-kb-manager.txt","// ============================================================
+// CORVID | managers/database/exploit-kb-manager
+// Global exploit knowledge base - tracks which exploits work
+// against which library versions across ALL targets.
+//
+// Schema:
+//   id            string  - auto-generated e.g. ""ek_001""
+//   lib_name      string  - e.g. ""libssh.so""
+//   lib_version   string  - e.g. ""3.8.3""
+//   address       string  - memory address e.g. ""0x289FC9EA""
+//   exploit       string  - exploit name e.g. ""onteralsmax_s""
+//   outcome       string  - success | constraint_blocked | version_mismatch | uncertain
+//   rtype         string  - shell | computer | file | Failed
+//   result_path   string  - for file results, the path e.g. ""/lib""
+//   privilege     string  - root | guest | username for shell results
+//   constraints   string  - space-separated parsed constraint tags
+//   blocked_by    string  - which constraint blocked this (if blocked)
+//   success_count number  - how many times this worked
+//   fail_count    number  - how many times this returned null/Failed
+//   last_success  string  - date of last successful run
+//   last_attempt  string  - date of last attempt
+//   notes         string  - freeform notes
+// ============================================================
+
+ExploitKbManager = {}
+ExploitKbManager.mediator = null
+ExploitKbManager.db       = null
+
+// ── Init ──────────────────────────────────────────────────────────────────
+ExploitKbManager.init = function()
+    kbRaw = Database.New(""exploit-kb"")
+    kbRaw.setMediator(self.mediator)
+    kbRaw.load()
+    self.db = kbRaw
+end function
+
+// ── Save ──────────────────────────────────────────────────────────────────
+ExploitKbManager.save = function()
+    return self.db.save()
+end function
+
+// ── Lookup by lib name + version ──────────────────────────────────────────
+// Returns all records for this lib/version sorted: success first,
+// then constraint_blocked, then uncertain, then version_mismatch
+ExploitKbManager.lookup = function(libName, libVersion)
+    matchLib = function(record)
+        if not record.hasIndex(""lib_name"")    then
+            return false
+        end if
+        if not record.hasIndex(""lib_version"") then
+            return false
+        end if
+        return record.lib_name == libName and record.lib_version == libVersion
+    end function
+    all = self.db.query(@matchLib)
+
+    // Sort by outcome priority
+    successes   = []
+    blocked     = []
+    uncertain   = []
+    mismatched  = []
+    for r in all
+        o = ""uncertain""
+        if r.hasIndex(""outcome"") then
+            o = r.outcome
+        end if
+        if o == ""success"" then
+            successes.push(r)
+        else if o == ""constraint_blocked"" then
+            blocked.push(r)
+        else if o == ""uncertain"" then
+            uncertain.push(r)
+        else
+            mismatched.push(r)
+        end if
+    end for
+
+    result = []
+    for r in successes
+        result.push(r)
+    end for
+    for r in blocked
+        result.push(r)
+    end for
+    for r in uncertain
+        result.push(r)
+    end for
+    for r in mismatched
+        result.push(r)
+    end for
+    return result
+end function
+
+// ── Get best exploit for a lib/version ───────────────────────────────────
+// Returns the top success record, or null if none known
+ExploitKbManager.getBestExploit = function(libName, libVersion)
+    records = self.lookup(libName, libVersion)
+    for r in records
+        if r.hasIndex(""outcome"") and r.outcome == ""success"" then
+            return r
+        end if
+    end for
+    return null
+end function
+
+// ── Get all successes for a lib/version ──────────────────────────────────
+ExploitKbManager.getSuccesses = function(libName, libVersion)
+    records = self.lookup(libName, libVersion)
+    result = []
+    for r in records
+        if r.hasIndex(""outcome"") and r.outcome == ""success"" then
+            result.push(r)
+        end if
+    end for
+    return result
+end function
+
+// ── Get constraint-blocked records for a lib/version ─────────────────────
+ExploitKbManager.getBlocked = function(libName, libVersion)
+    records = self.lookup(libName, libVersion)
+    result = []
+    for r in records
+        if r.hasIndex(""outcome"") and r.outcome == ""constraint_blocked"" then
+            result.push(r)
+        end if
+    end for
+    return result
+end function
+
+// ── Parse constraints from scan_address text ─────────────────────────────
+// Extracts * constraint lines and maps them to canonical tags
+ExploitKbManager.parseConstraints = function(scanText)
+    constraints = []
+    if scanText == null or scanText.len == 0 then
+        return constraints
+    end if
+    for line in scanText.split(char(10))
+        trimmed = line.trim
+        if trimmed.indexOf(""* "") != 0 then
+            continue
+        end if
+        raw = trimmed[2:].lower.trim
+        // Map to canonical tags
+        if raw.indexOf(""root"") != null and raw.indexOf(""connect"") != null then
+            constraints.push(""root_online"")
+        else if raw.indexOf(""user"") != null and raw.indexOf(""connect"") != null then
+            constraints.push(""user_online"")
+        else if raw.indexOf(""lan"") != null then
+            constraints.push(""lan_required"")
+        else if raw.indexOf(""computer"") != null and raw.indexOf(""minimum"") != null then
+            constraints.push(""min_computers"")
+        else if raw.indexOf(""process"") != null then
+            constraints.push(""process_required"")
+        else
+            // Store raw if unrecognised
+            constraints.push(""raw:"" + raw[:40])
+        end if
+    end for
+    return constraints
+end function
+
+// ── Check if constraints are currently met ───────────────────────────────
+// Returns """" if met, or the blocking constraint name if not
+// netSession is the result of meta.net_use(ip, port)
+ExploitKbManager.checkConstraints = function(constraints, netSession, lanIp)
+    for c in constraints
+        if c == ""root_online"" then
+            if netSession != null and netSession.is_root_active_user != 1 then
+                return ""root_online""
+            end if
+        else if c == ""user_online"" then
+            if netSession != null and netSession.is_any_active_user != 1 then
+                return ""user_online""
+            end if
+        else if c == ""lan_required"" then
+            if lanIp.len == 0 then
+                return ""lan_required""
+            end if
+        end if
+        // min_computers and process_required can't be checked remotely - skip
+    end for
+    return """"
+end function
+
+// ── Record an exploit attempt ─────────────────────────────────────────────
+ExploitKbManager.record = function(libName, libVersion, address, exploit, outcome, constraints, rtype, resultPath, privilege, blockedBy)
+    // Find existing record for this exact lib/version/address/exploit combo
+    matchRecord = function(r)
+        if not r.hasIndex(""lib_name"")   then
+            return false
+        end if
+        if not r.hasIndex(""lib_version"") then
+            return false
+        end if
+        if not r.hasIndex(""address"")    then
+            return false
+        end if
+        if not r.hasIndex(""exploit"")    then
+            return false
+        end if
+        return r.lib_name == libName and r.lib_version == libVersion and r.address == address and r.exploit == exploit
+    end function
+    existing = self.db.query(@matchRecord)
+
+    today = current_date
+
+    if existing.len > 0 then
+        rec = existing[0]
+        // Update counters
+        if outcome == ""success"" then
+            if not rec.hasIndex(""success_count"") then
+                rec.success_count = 0
+            end if
+            rec.success_count = rec.success_count + 1
+            rec.last_success  = today
+            rec.outcome       = ""success""
+            if rtype.len > 0 then
+                rec.rtype = rtype
+            end if
+            if resultPath.len > 0 then
+                rec.result_path = resultPath
+            end if
+            if privilege.len > 0 then
+                rec.privilege = privilege
+            end if
+        else if outcome == ""uncertain"" then
+            if not rec.hasIndex(""fail_count"") then
+                rec.fail_count = 0
+            end if
+            rec.fail_count = rec.fail_count + 1
+            // Promote to uncertain if fail count > 2 and still no success
+            if rec.fail_count > 2 and rec.outcome != ""success"" then
+                rec.outcome = ""uncertain""
+            end if
+        else if outcome == ""constraint_blocked"" then
+            // Don't count constraint blocks as failures
+            rec.outcome    = ""constraint_blocked""
+            rec.blocked_by = blockedBy
+        else if outcome == ""version_mismatch"" then
+            rec.outcome = ""version_mismatch""
+        end if
+        rec.last_attempt  = today
+        // Merge constraints
+        if constraints.len > 0 then
+            constraintStr = constraints.join("" "")
+            if not rec.hasIndex(""constraints"") or rec.constraints.len == 0 then
+                rec.constraints = constraintStr
+            end if
+        end if
+        self.db.set(rec.id, rec)
+        self.db.dirty = true
+    else
+        // New record
+        id = self.db.nextId(""ek"")
+        rec = {}
+        rec.id            = id
+        rec.lib_name      = libName
+        rec.lib_version   = libVersion
+        rec.address       = address
+        rec.exploit       = exploit
+        rec.outcome       = outcome
+        rec.rtype         = rtype
+        rec.result_path   = resultPath
+        rec.privilege     = privilege
+        rec.constraints   = constraints.join("" "")
+        rec.blocked_by    = blockedBy
+        rec.success_count = 0
+        rec.fail_count    = 0
+        rec.last_success  = """"
+        rec.last_attempt  = today
+        rec.notes         = """"
+        if outcome == ""success"" then
+            rec.success_count = 1
+            rec.last_success  = today
+        else if outcome == ""uncertain"" then
+            rec.fail_count = 1
+        end if
+        self.db.set(id, rec)
+        self.db.dirty = true
+    end if
+end function
+
+// ── Summarise KB for display ──────────────────────────────────────────────
+ExploitKbManager.stats = function()
+    all = self.db.all()
+    total     = all.len
+    successes = 0
+    blocked   = 0
+    uncertain = 0
+    libVersions = []
+    for r in all
+        o = ""uncertain""
+        if r.hasIndex(""outcome"") then
+            o = r.outcome
+        end if
+        if o == ""success"" then
+            successes = successes + 1
+        else if o == ""constraint_blocked"" then
+            blocked = blocked + 1
+        else if o == ""uncertain"" then
+            uncertain = uncertain + 1
+        end if
+        lv = """"
+        if r.hasIndex(""lib_name"") and r.hasIndex(""lib_version"") then
+            lv = r.lib_name + "" v"" + r.lib_version
+        end if
+        if lv.len > 0 then
+            seen = false
+            for existing in libVersions
+                if existing == lv then
+                    seen = true
+                end if
+            end for
+            if not seen then
+                libVersions.push(lv)
+            end if
+        end if
+    end for
+    result = {}
+    result.total      = total
+    result.successes  = successes
+    result.blocked    = blocked
+    result.uncertain  = uncertain
+    result.libVersions = libVersions.len
+    return result
+end function
+
+ExploitKbManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+ExploitKbManager.New = function()
+    result = new ExploitKbManager
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/intel-manager.txt","// ============================================================
+// CORVID | managers/intel/intel-manager
+// Harvest orchestration. Reads passwd, Mail.txt, Bank.txt
+// from the current session and feeds all results directly
+// into the database. Auto-links persons to orgs.
+// Uses crypto.decipher as primary cracker and MD5 dictionary
+// as fallback (Viper's getpass approach).
+// ============================================================
+
+IntelManager = {}
+IntelManager.mediator = null
+
+// ---- Internal: crack a password hash ----
+
+IntelManager.crackHash = function(username, hash)
+    libManager = self.mediator.getExtension(""libManager"")
+    crypto     = libManager.getCrypto()
+
+    // Primary: crypto.decipher(username, hash)
+    if not (crypto isa Error) then
+        result = crypto.decipher(username, hash)
+        if not (result isa Error) then
+            return result
+        end if
+    end if
+
+    // Fallback: MD5 dictionary comparison
+    // md5(password) == hash
+    dictionaryManager = self.mediator.getExtension(""dictionaryManager"")
+    if dictionaryManager != null then
+        password = dictionaryManager.get()
+        while not (password isa Error)
+            if md5(password) == hash then
+                dictionaryManager.reset()
+                return password
+            end if
+            password = dictionaryManager.get()
+        end while
+        dictionaryManager.reset()
+    end if
+
+    return Error.New(""Could not crack hash for: "" + username, ""CRACK_FAILED"")
+end function
+
+// ---- Internal: extract domain from email ----
+
+IntelManager.domainFromEmail = function(email)
+    if email.indexOf(""@"") == null then
+        return """"
+    end if
+    return email[email.indexOf(""@"") + 1:]
+end function
+
+IntelManager.orgNameFromDomain = function(domain)
+    parts = domain.split(""\\."")
+    if parts.len == 0 then
+        return domain
+    end if
+    return parts[0]
+end function
+
+// ---- Internal: ensure org exists, return org_id ----
+
+IntelManager.ensureOrg = function(domain, publicIp)
+    if domain.len == 0 then
+        return """"
+    end if
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    orgName   = self.orgNameFromDomain(domain)
+    orgData   = {}
+    orgData.domain = domain
+    orgData.name   = orgName
+    orgData.ips    = [publicIp]
+    return dbManager.upsertOrg(orgData)
+end function
+
+// ---- Harvest /etc/passwd ----
+
+IntelManager.harvestPasswd = function(handler, publicIp, lanIp)
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    results   = {""cracked"": 0, ""failed"": 0, ""skipped"": 0}
+
+    passwdFile = handler.getFile(""/etc/passwd"")
+    if passwdFile isa Error then
+        return Error.New(""Could not read /etc/passwd"", ""NOT_FOUND"")
+    end if
+
+    content = passwdFile.content()
+    if content isa Error then
+        return content
+    end if
+
+    lines = content.split(char(10))
+    for line in lines
+        if line.len == 0 then
+            continue
+        end if
+        colonIdx = line.indexOf("":"")
+        if colonIdx == null then
+            continue
+        end if
+
+        username = line[:colonIdx]
+        hash     = line[colonIdx + 1:]
+        if username.len == 0 or hash.len == 0 then
+            continue
+        end if
+
+        password  = self.crackHash(username, hash)
+        cracked   = not (password isa Error)
+
+        credData = {}
+        credData.type      = CRED_TYPES.SYSTEM
+        credData.username  = username
+        credData.hash      = hash
+        credData.password  = """"
+        credData.public_ip = publicIp
+        credData.lan_ip    = lanIp
+        credData.source    = ""native""
+        if cracked then
+            credData.password = password
+            results.cracked   = results.cracked + 1
+        else
+            results.failed = results.failed + 1
+        end if
+
+        dbManager.upsertCredential(credData)
+    end for
+
+    return results
+end function
+
+// ---- Harvest Mail.txt files ----
+
+IntelManager.harvestMail = function(handler, publicIp, lanIp)
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    results   = {""persons"": 0, ""passwords"": 0, ""failed"": 0}
+
+    homeDir = handler.getFile(""/home"")
+    if homeDir isa Error then
+        return homeDir
+    end if
+
+    kids = homeDir.children()
+    if kids isa Error then
+        return kids
+    end if
+
+    for userFolder in kids
+        if userFolder.name() == ""guest"" then
+            continue
+        end if
+
+        mailFile = handler.getFile(""/home/"" + userFolder.name() + ""/Config/Mail.txt"")
+        if mailFile isa Error then
+            continue
+        end if
+        content = mailFile.content()
+        if content isa Error then
+            continue
+        end if
+
+        lines     = content.split(char(10))
+        name      = """"
+        email     = """"
+        domain    = """"
+        netAddr   = """"
+
+        for line in lines
+            if line.len == 0 then
+                continue
+            end if
+
+            // Email:hash credential line  -  format email@domain.com:hash
+            colonIdx = line.indexOf("":"")
+            atIdx    = line.indexOf(""@"")
+            if colonIdx != null and atIdx != null and atIdx < colonIdx then
+                emailPart = line[:colonIdx]
+                emailPart = emailPart.trim
+                hashPart  = line[colonIdx + 1:]
+                hashPart = hashPart.trim
+                if emailPart.indexOf(""@"") != null and hashPart.len > 0 then
+                    password = self.crackHash(emailPart, hashPart)
+                    credData = {}
+                    credData.type      = CRED_TYPES.MAIL
+                    credData.username  = emailPart
+                    credData.hash      = hashPart
+                    credData.password  = """"
+                    credData.public_ip = publicIp
+                    credData.lan_ip    = lanIp
+                    credData.source    = ""native""
+                    if not (password isa Error) then
+                        credData.password     = password
+                        results.passwords     = results.passwords + 1
+                    else
+                        results.failed = results.failed + 1
+                    end if
+                    dbManager.upsertCredential(credData)
+                    // Use as primary email for this user if none found yet
+                    if email.len == 0 then
+                        email = emailPart
+                    end if
+                end if
+                continue
+            end if
+
+            // From: Name <email> line
+            if startsWith(line, ""From:"") then
+                fromVal = line[5:]
+                fromVal = fromVal.trim
+                if fromVal.indexOf(""<"") != null and fromVal.indexOf("">"") != null then
+                    ltIdx = fromVal.indexOf(""<"")
+                    gtIdx = fromVal.indexOf("">"")
+                    name  = fromVal[:ltIdx]
+                    name = name.trim
+                    email = fromVal[ltIdx + 1 : gtIdx]
+                    email = email.trim
+                else
+                    email = fromVal.trim
+                end if
+                if email.indexOf(""@"") != null then
+                    domain = self.domainFromEmail(email)
+                end if
+                continue
+            end if
+
+            // Name: line
+            if startsWith(line, ""Name:"") then
+                name = line[5:]
+                name = name.trim
+                continue
+            end if
+
+            // Network address
+            trimmedLine = line.trim
+            if is_valid_ip(trimmedLine) then
+                netAddr = trimmedLine
+                continue
+            end if
+        end for
+
+        // Save person if we have an email
+        if email.len > 0 then
+            orgId = self.ensureOrg(domain, publicIp)
+
+            personData = {}
+            personData.name    = name
+            personData.email   = email
+            personData.org_id  = orgId
+            personData.ips     = [publicIp]
+            personData.lan_ips = [lanIp]
+            personData.source  = ""mail""
+            if netAddr.len > 0 then
+                personData.ips.push(netAddr)
+            end if
+
+            personId = dbManager.upsertPerson(personData)
+            results.persons = results.persons + 1
+
+            // Link credentials back to this person
+            creds = dbManager.findCredentialsByIp(publicIp)
+            for cred in creds
+                if cred.username == email then
+                    dbManager.linkCredentialToPerson(cred.id, personId)
+                end if
+            end for
+        end if
+    end for
+
+    return results
+end function
+
+// ---- Harvest Bank.txt files ----
+
+IntelManager.harvestBank = function(handler, publicIp, lanIp)
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    results   = {""harvested"": 0}
+
+    homeDir = handler.getFile(""/home"")
+    if homeDir isa Error then
+        return homeDir
+    end if
+
+    kids = homeDir.children()
+    if kids isa Error then
+        return kids
+    end if
+
+    for userFolder in kids
+        if userFolder.name() == ""guest"" then
+            continue
+        end if
+
+        bankFile = handler.getFile(""/home/"" + userFolder.name() + ""/Config/Bank.txt"")
+        if bankFile isa Error then
+            continue
+        end if
+        content = bankFile.content()
+        if content isa Error then
+            continue
+        end if
+
+        bankStr = content.replace(char(10), "" "").trim
+        bankNum = bankStr
+        bankPass = """"
+        colonIdx = bankStr.indexOf("":"")
+        if colonIdx != null then
+            bankNum = bankStr[:colonIdx]
+            bankHash = bankStr[colonIdx + 1:]
+            if bankHash.len > 0 then
+                libManager = self.mediator.getExtension(""libManager"")
+                cryptoLib  = libManager.getCrypto()
+                if not (cryptoLib isa Error) then
+                    deciphered = cryptoLib.decipher("""", bankHash)
+                    if not (deciphered isa Error) then
+                        bankPass = deciphered
+                    end if
+                end if
+            end if
+        end if
+
+        credData = {}
+        credData.type        = CRED_TYPES.BANK
+        credData.username    = userFolder.name()
+        credData.password    = bankPass
+        credData.hash        = """"
+        credData.bank_number = bankNum
+        credData.public_ip   = publicIp
+        credData.lan_ip      = lanIp
+        credData.source      = ""native""
+
+        dbManager.upsertCredential(credData)
+        results.harvested = results.harvested + 1
+    end for
+
+    return results
+end function
+
+// ---- Harvest whois data ----
+
+IntelManager.harvestWhois = function(ip)
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    raw = whois(ip)
+    if raw == null or raw == ""No Info available"" then
+        return Error.New(""No whois data for: "" + ip, ""NO_WHOIS"")
+    end if
+
+    result = {}
+    result.adminName  = """"
+    result.adminEmail = """"
+    result.domain     = """"
+    result.phone      = """"
+
+    lines = raw.split(char(10))
+    for line in lines
+        if line.indexOf(""Administrative contact:"") != null then
+            adminSlice = line[line.indexOf("":"") + 1:]
+            result.adminName = adminSlice.trim
+        end if
+        if line.indexOf(""Email address:"") != null then
+            adminSlice = line[line.indexOf("":"") + 1:]
+            result.adminEmail = adminSlice.trim
+        end if
+        if line.indexOf(""Domain name:"") != null then
+            adminSlice = line[line.indexOf("":"") + 1:]
+            result.domain = adminSlice.trim
+        end if
+        if line.indexOf(""Phone:"") != null then
+            adminSlice = line[line.indexOf("":"") + 1:]
+            result.phone = adminSlice.trim
+        end if
+    end for
+
+    // Save org
+    if result.domain.len > 0 then
+        orgData = {}
+        orgData.domain = result.domain
+        orgData.name   = self.orgNameFromDomain(result.domain)
+        orgData.ips    = [ip]
+        orgId = dbManager.upsertOrg(orgData)
+
+        // Save admin as a person
+        if result.adminEmail.len > 0 then
+            personData = {}
+            personData.name    = result.adminName
+            personData.email   = result.adminEmail
+            personData.org_id  = orgId
+            personData.ips     = [ip]
+            personData.lan_ips = []
+            personData.source  = ""whois""
+            dbManager.upsertPerson(personData)
+        end if
+    end if
+
+    return result
+end function
+
+// ---- Full harvest on current session ----
+
+IntelManager.harvestAll = function(publicIp, lanIp, forceSkipPasswd)
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    dbManager      = self.mediator.getExtension(""databaseManager"")
+    handler        = sessionManager.currentSession.handler
+    ui             = self.mediator.getExtension(""corvidUi"")
+    priv           = handler.privilege()
+
+    summary = {}
+    summary.passwd   = {}
+    summary.mail     = {}
+    summary.bank     = {}
+    summary.whois    = {}
+
+    // ── Whois ─────────────────────────────────────────────────────────────
+    // Skip if we already have org data for this IP
+    existingOrgs = dbManager.findTarget(publicIp)
+    hasWhois = false
+    if existingOrgs.len > 0 then
+        t = existingOrgs[0]
+        if t.hasIndex(""notes"") and t.notes.indexOf(""whois:done"") != null then
+            hasWhois = true
+        end if
+    end if
+    if hasWhois then
+        ui.dim(""whois: already harvested - skipping"")
+    else
+        ui.info(""Running whois on "" + publicIp + ""..."")
+        whoisResult = self.harvestWhois(publicIp)
+        if whoisResult isa Error then
+            ui.warning(""Whois: "" + whoisResult.message)
+        else
+            summary.whois = whoisResult
+            ui.success(""Whois: "" + whoisResult.domain + "" | "" + whoisResult.adminEmail)
+            // Mark whois as done in target notes
+            targets = dbManager.findTarget(publicIp)
+            if targets.len > 0 then
+                t2 = targets[0]
+                existNotes = """"
+                if t2.hasIndex(""notes"") then
+                    existNotes = t2.notes
+                end if
+                if existNotes.indexOf(""whois:done"") == null then
+                    if existNotes.len > 0 then
+                        existNotes = existNotes + "" ""
+                    end if
+                    t2.notes = existNotes + ""whois:done""
+                    dbManager.upsertTarget(t2)
+                end if
+            end if
+        end if
+    end if
+
+    // ── /etc/passwd ───────────────────────────────────────────────────────
+    // Check what we already have vs what privilege can give us now
+    // KEY: use LAN IP as primary key when available - different LAN machines
+    // share the same public IP so checking by public IP causes false skips
+    checkIp = publicIp
+    if lanIp.len > 0 and lanIp != ""unknown"" and lanIp != publicIp then
+        checkIp = lanIp
+    end if
+    existingCreds = dbManager.findCredentialsByIp(checkIp)
+    hasRootHash   = false
+    allUsersCracked = true
+    crackedCount  = 0
+    for ec in existingCreds
+        if ec.type == ""system"" and ec.username == ""root"" and ec.password.len > 0 then
+            hasRootHash = true
+        end if
+        if ec.type == ""system"" and ec.password.len == 0 then
+            allUsersCracked = false
+        end if
+        if ec.type == ""system"" and ec.password.len > 0 then
+            crackedCount = crackedCount + 1
+        end if
+    end for
+
+    skipPasswd = false
+    if forceSkipPasswd then
+        skipPasswd = true
+        ui.dim(""passwd: skipping (handled by escalation strategy)"")
+    else if priv == ""root"" and hasRootHash and allUsersCracked then
+        skipPasswd = true
+        ui.dim(""passwd: all hashes already cracked - skipping"")
+    else if priv != ""root"" and crackedCount > 0 then
+        skipPasswd = true
+        ui.dim(""passwd: "" + str(crackedCount) + "" creds in DB, need root for complete harvest - skipping"")
+    end if
+
+    if not skipPasswd then
+        ui.info(""Harvesting /etc/passwd..."")
+        passwdResult = self.harvestPasswd(handler, publicIp, lanIp)
+        if passwdResult isa Error then
+            ui.warning(""passwd: "" + passwdResult.message)
+        else
+            summary.passwd = passwdResult
+            ui.success(""passwd: "" + passwdResult.cracked + "" cracked, "" + passwdResult.failed + "" failed"")
+        end if
+    end if
+
+    // ── Mail files ────────────────────────────────────────────────────────
+    // Always check by public IP - LAN IPs like 192.168.0.2 are shared across
+    // many unrelated machines and cause false positive skips
+    mailCreds = 0
+    mailCredsForIp = dbManager.findCredentialsByIp(publicIp)
+    for ec in mailCredsForIp
+        if ec.type == ""mail"" then
+            ecSource = """"
+            if ec.hasIndex(""source"") then
+                ecSource = ec.source
+            end if
+            if ecSource != ""routerattack"" and ecSource != ""routerattack_file"" then
+                mailCreds = mailCreds + 1
+            end if
+        end if
+    end for
+
+    if mailCreds > 0 then
+        ui.dim(""mail: "" + str(mailCreds) + "" mail creds in DB - skipping"")
+    else
+        ui.info(""Harvesting mail files..."")
+        mailResult = self.harvestMail(handler, publicIp, lanIp)
+        if mailResult isa Error then
+            ui.warning(""mail: "" + mailResult.message)
+        else
+            summary.mail = mailResult
+            ui.success(""mail: "" + mailResult.persons + "" persons, "" + mailResult.passwords + "" passwords"")
+        end if
+    end if
+
+    // ── Bank files ────────────────────────────────────────────────────────
+    // Always check by public IP for same reason as mail
+    bankCreds = 0
+    for ec in mailCredsForIp
+        if ec.type == ""bank"" then
+            ecSource = """"
+            if ec.hasIndex(""source"") then
+                ecSource = ec.source
+            end if
+            if ecSource != ""routerattack"" and ecSource != ""routerattack_file"" then
+                bankCreds = bankCreds + 1
+            end if
+        end if
+    end for
+
+    if bankCreds > 0 then
+        ui.dim(""bank: "" + str(bankCreds) + "" records in DB - skipping"")
+    else
+        ui.info(""Harvesting bank files..."")
+        bankResult = self.harvestBank(handler, publicIp, lanIp)
+        if bankResult isa Error then
+            ui.warning(""bank: "" + bankResult.message)
+        else
+            summary.bank = bankResult
+            ui.success(""bank: "" + bankResult.harvested + "" records"")
+        end if
+    end if
+
+    // Save
+    dbManager.save()
+    ui.success(""Database saved."")
+
+    return summary
+end function
+
+// ---- Check bounce candidacy ----
+
+IntelManager.checkBounceCandidate = function(publicIp, lanIp)
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler        = sessionManager.currentSession.handler
+
+    // Check for SSH port
+    ports = handler.getPorts()
+    if ports isa Error then
+        return false
+    end if
+    hasSsh = false
+    for port in ports
+        if port.port_number == 22 then
+            hasSsh = true
+        end if
+    end for
+    if not hasSsh then
+        return false
+    end if
+
+    // Check for cracked root password in database
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    creds = dbManager.findCredentialsByIp(publicIp)
+    for cred in creds
+        if cred.type == CRED_TYPES.SYSTEM and cred.username == ""root"" and cred.password.len > 0 then
+            return cred.password
+        end if
+    end for
+
+    return false
+end function
+
+IntelManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+IntelManager.New = function()
+    result = new IntelManager
+    return result
+end function
+",1)
+m("/Corvid/asriN/data/chainsaw.txt","// chainsaw placeholder - replace with chainsaw.txt manually
+",1)
+m("/Corvid/asriN/data/pregens.src","pregens = []
+",1)
+m("/Corvid/asriN/managers/attack-manager.txt","// CORVID | managers/attack/attack-manager
+// Orchestrates the full attack workflow.
+// Checks database for existing exploit data before scanning.
+// Stores results back to database after testing.
+// Feeds target records into the database automatically.
+// ============================================================
+
+AttackManager = {}
+AttackManager.mediator = null
+
+AttackManager.buildLibKey = function(lib)
+    // lib here is a raw MetaLib from dump_lib()
+    return lib.lib_name + ""_"" + lib.version
+end function
+
+AttackManager.getOrCreateTarget = function(publicIp, lanIp, routerIp)
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    existing  = dbManager.findTarget(publicIp)
+    if existing.len > 0 then
+        return existing[0]
+    end if
+
+    targetData = {}
+    targetData.public_ip = publicIp
+    targetData.lan_ip    = lanIp
+    targetData.router_ip = routerIp
+    targetData.status    = TARGET_STATUS.UNKNOWN
+    id = dbManager.upsertTarget(targetData)
+    return dbManager.getTarget(id)
+end function
+
+AttackManager.runScan = function(publicIp, port, lanIp, routerIp)
+    // Perform a scan cycle, storing results to DB.
+    // Checks exploit KB first to skip scanning known lib/versions.
+    ui           = self.mediator.getExtension(""corvidUi"")
+    dbManager    = self.mediator.getExtension(""databaseManager"")
+    metaxManager = self.mediator.getExtension(""metaxploitManager"")
+
+    target = self.getOrCreateTarget(publicIp, lanIp, routerIp)
+
+    metaxploit = metaxManager.getMetaxploit()
+    if metaxploit isa Error then
+        return metaxploit
+    end if
+
+    session = metaxploit.netUse(publicIp, port)
+    if session isa Error then
+        return session
+    end if
+
+    rawLib = session.dump_lib()
+    if rawLib == null then
+        return Error.New(""Could not get target library"", ""DUMP_LIB_ERROR"")
+    end if
+
+    libName    = rawLib.lib_name
+    libVersion = rawLib.version
+    libKey     = self.buildLibKey(rawLib)
+
+    // ── Check exploit KB first ────────────────────────────────────────────
+    kbResults = dbManager.kbLookup(libName, libVersion)
+    if kbResults.len > 0 then
+        // Build storable list from KB records - prioritise successes
+        fromKb = []
+        for kr in kbResults
+            if kr.outcome == ""success"" then
+                entry = {}
+                entry.address   = kr.address
+                entry.exploit   = kr.exploit
+                entry.rtype     = kr.rtype
+                entry.privilege = kr.privilege
+                fromKb.push(entry)
+            end if
+        end for
+        // Also include constraint_blocked - conditions may have changed
+        for kr in kbResults
+            if kr.outcome == ""constraint_blocked"" then
+                entry = {}
+                entry.address   = kr.address
+                entry.exploit   = kr.exploit
+                entry.rtype     = kr.rtype
+                entry.privilege = kr.privilege
+                fromKb.push(entry)
+            end if
+        end for
+        if fromKb.len > 0 then
+            ui.success(""KB hit: "" + libName + "" v"" + libVersion + "" - "" + str(fromKb.len) + "" known exploit(s) - skipping scan"")
+            // Store to per-target DB too so deep escalation can find them
+            existing = dbManager.getExploits(target.id, libKey)
+            if existing.len == 0 then
+                dbManager.storeExploits(target.id, libKey, fromKb)
+            end if
+            return fromKb
+        end if
+        ui.dim(""KB: "" + libName + "" v"" + libVersion + "" known but no successes yet - running full scan"")
+    end if
+
+    // ── Check per-target cache ────────────────────────────────────────────
+    existing = dbManager.getExploits(target.id, libKey)
+    if existing.len > 0 then
+        ui.info(""Existing exploit data found for "" + libKey + ""  -  "" + existing.len + "" record(s)"")
+        return existing
+    end if
+
+    // ── Full scan (respect kbFallback toggle) ─────────────────────────────
+    kbFallbackCfg = ""1""
+    cfgMgrScan = self.mediator.getExtension(""configManager"")
+    if cfgMgrScan != null then
+        kbFbVal = cfgMgrScan.get(""kbFallback"")
+        if not (kbFbVal isa Error) then
+            kbFallbackCfg = kbFbVal
+        end if
+    end if
+    if kbFallbackCfg != ""1"" then
+        ui.dim(""  kbFallback OFF — skipping full scan for unknown lib"")
+        return []
+    end if
+    ui.info(""Scanning "" + publicIp + "":"" + str(port) + "" ("" + libKey + "")..."")
+    results = metaxManager.hack(publicIp, port)
+    if results isa Error then
+        return results
+    end if
+
+    ui.success(""Found "" + str(results.len) + "" result(s)."")
+
+    // Feed raw scan texts into shinylibs while we have the lib loaded
+    shinyMgr = self.mediator.getExtension(""shinyLibsManager"")
+    if shinyMgr != null then
+        configMgr = self.mediator.getExtension(""configManager"")
+        autoShiny = configMgr.get(""autoShiny"")
+        if autoShiny isa Error then
+            autoShiny = ""1""
+        end if
+        if autoShiny == ""1"" then
+            metaFacade = metaxManager.getMetaxploit()
+            if not (metaFacade isa Error) then
+                exploitTexts = []
+                addrs = metaFacade.scan(rawLib)
+                if addrs != null then
+                    for addr in addrs
+                        txt = metaFacade.scanAddress(rawLib, addr)
+                        if txt != null and not (txt isa Error) then
+                            exploitTexts.push(txt)
+                        end if
+                    end for
+                end if
+                if exploitTexts.len > 0 then
+                    shinyType = shinyMgr.db.stage(libName, libVersion, exploitTexts, """")
+                    if shinyType != null then
+                        ui.dim(""  [shiny] "" + libName + "" v"" + libVersion + "" staged as "" + shinyType)
+                    end if
+                end if
+            end if
+        end if
+    end if
+
+    // Store metadata to per-target DB and exploit KB
+    storable = []
+    for r in results
+        entry = {}
+        entry.address   = r.address
+        entry.exploit   = r.exploit
+        entry.rtype     = r.rtype
+        entry.privilege = r.privilege
+        storable.push(entry)
+
+        // Record in KB - determine outcome from rtype
+        kbOutcome = ""uncertain""
+        kbRtype   = r.rtype
+        kbPath    = """"
+        kbPriv    = """"
+        if r.rtype == ""shell"" or r.rtype == ""computer"" then
+            kbOutcome = ""success""
+            kbPriv    = r.privilege
+        else if r.rtype == ""file"" then
+            kbOutcome = ""success""
+            kbPath    = r.privilege  // privilege field holds path for file results
+        else if r.rtype == ""Failed"" then
+            kbOutcome = ""uncertain""
+        end if
+        // Constraints not available from hack() - will be populated on explicit exploit attempt
+        dbManager.kbRecord(libName, libVersion, r.address, r.exploit, kbOutcome, [], kbRtype, kbPath, kbPriv, """")
+    end for
+
+    dbManager.storeExploits(target.id, libKey, storable)
+
+    hasBetter = false
+    for r in results
+        if r.rtype == ""shell"" or r.rtype == ""computer"" then
+            hasBetter = true
+        end if
+    end for
+    if hasBetter then
+        dbManager.setTargetStatus(target.id, TARGET_STATUS.SCANNED)
+    end if
+
+    portRecord = {}
+    portRecord.port      = port
+    portRecord.service   = libName
+    portRecord.version   = libVersion
+    portRecord.forwarded = true
+    portRecord.exploited = false
+    targetData = {}
+    targetData.public_ip = publicIp
+    targetData.lan_ip    = lanIp
+    targetData.ports     = [portRecord]
+    dbManager.upsertTarget(targetData)
+    dbManager.save()
+    return storable
+end function
+
+AttackManager.exploit = function(publicIp, port, lanIp, routerIp, resultIndex)
+    // Run a specific exploit by index from the stored results.
+    ui           = self.mediator.getExtension(""corvidUi"")
+    dbManager    = self.mediator.getExtension(""databaseManager"")
+    metaxManager = self.mediator.getExtension(""metaxploitManager"")
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+
+    // Get target and lib key
+    metaxploit = metaxManager.getMetaxploit()
+    if metaxploit isa Error then
+        return metaxploit
+    end if
+
+    session = metaxploit.netUse(publicIp, port)
+    if session isa Error then
+        return session
+    end if
+    rawLib = session.dump_lib()
+    if rawLib == null then
+        return Error.New(""Could not get target library"", ""DUMP_LIB_ERROR"")
+    end if
+    libKey = self.buildLibKey(rawLib)
+
+    target = self.getOrCreateTarget(publicIp, lanIp, routerIp)
+    storedResults = dbManager.getExploits(target.id, libKey)
+    if storedResults.len == 0 then
+        return Error.New(""No scan data found. Run scan first."", ""NO_SCAN_DATA"")
+    end if
+
+    if resultIndex == null then
+        // Auto-select best
+        selected = self.autoSelectBest(storedResults)
+    else
+        if not storedResults.hasIndex(resultIndex) then
+            return Error.New(""Invalid result index: "" + resultIndex, ""OUT_OF_RANGE"")
+        end if
+        selected = storedResults[resultIndex]
+    end if
+
+    if selected == null then
+        return Error.New(""No usable exploit found in stored results"", ""NO_EXPLOIT"")
+    end if
+
+    ui.info(""Running exploit: "" + selected.address + "" | "" + selected.exploit)
+
+    // If this is a password-change exploit, attempt to harvest the CURRENT
+    // root password BEFORE we change it, so native_pass can be preserved
+    if selected.hasIndex(""privilege"") and selected.privilege.len > 0 and selected.privilege != ""none"" and selected.privilege != ""guest"" then
+        ui.info(""Password-change exploit detected - attempting to read current passwd first..."")
+        crypto = include_lib(""/lib/crypto.so"")
+        if crypto == null then
+            crypto = include_lib(current_path + ""/crypto.so"")
+        end if
+        if crypto != null then
+            // Try to get the target computer via a net_use connection
+            preNet = metaxploit.netUse(publicIp, port)
+            if not (preNet isa Error) then
+                // Use the session to get computer object if possible
+                // Attempt via any existing shell session for this IP
+                existingSessions = sessionManager.sessions
+                for es in existingSessions
+                    if es.data.ip.public != publicIp then
+                        continue
+                    end if
+                    if not (es.handler isa ShellSession) then
+                        continue
+                    end if
+                    // Try to read /etc/passwd on the target
+                    passwdFile = es.handler.getFile(""/etc/passwd"")
+                    if passwdFile isa Error then
+                        continue
+                    end if
+                    rawHash = passwdFile.content()
+                    if rawHash isa Error or rawHash.len == 0 then
+                        continue
+                    end if
+                    nativePass = crypto.decipher(rawHash)
+                    if nativePass != null and nativePass.len > 0 then
+                        ui.success(""  Native root password captured: "" + nativePass)
+                        // Save as native credential BEFORE the change
+                        nativeCred = {}
+                        nativeCred.type      = ""system""
+                        nativeCred.username  = selected.privilege
+                        nativeCred.password  = nativePass
+                        nativeCred.public_ip = publicIp
+                        nativeCred.lan_ip    = lanIp
+                        nativeCred.source    = ""native""
+                        dbManager.upsertCredential(nativeCred)
+                        dbManager.save()
+                        ui.info(""  Saved native credential to DB before password change"")
+                    end if
+                    break
+                end for
+            end if
+        end if
+    end if
+
+    // Generate a clean alphanumeric password for password-change exploits
+    genPass = genRandomPass(12, selected.address)
+
+    // Fresh connection - capture lib name/version for KB recording
+    freshSession = metaxploit.netUse(publicIp, port)
+    if freshSession isa Error then
+        return freshSession
+    end if
+    freshLib = freshSession.dump_lib()
+    if freshLib == null then
+        return Error.New(""Could not reconnect"", ""CONNECT_ERROR"")
+    end if
+
+    kbLibName    = freshLib.lib_name
+    kbLibVersion = freshLib.version
+
+    // Check constraint state before attempting - record as blocked not failed
+    kbConstraints = []
+    kbExploitKb   = dbManager.getExploitKb()
+    // Look up known constraints for this exploit
+    kbExisting = dbManager.kbLookup(kbLibName, kbLibVersion)
+    for kbe in kbExisting
+        if kbe.address == selected.address and kbe.exploit == selected.exploit then
+            if kbe.hasIndex(""constraints"") and kbe.constraints.len > 0 then
+                for cs in kbe.constraints.split("" "")
+                    if cs.len > 0 then
+                        kbConstraints.push(cs)
+                    end if
+                end for
+            end if
+        end if
+    end for
+
+    // Check if any known constraints are currently unmet
+    if kbConstraints.len > 0 then
+        blockedBy = kbExploitKb.checkConstraints(kbConstraints, freshSession, lanIp)
+        if blockedBy.len > 0 then
+            ui.warning(""Constraint not met: "" + blockedBy + "" - recording as blocked, not failed"")
+            dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, ""constraint_blocked"", kbConstraints, selected.rtype, """", """", blockedBy)
+            dbManager.save()
+            return Error.New(""Constraint not met: "" + blockedBy, ""CONSTRAINT_BLOCKED"")
+        end if
+    end if
+
+    // Try WITHOUT genPass first - avoids changing root password unnecessarily
+    // Only fall back to genPass if this is a password-change exploit and the clean attempt failed
+    raw = freshLib.overflow(selected.address, selected.exploit)
+    passwordWasChanged = false
+
+    if (raw == null or typeof(raw) == ""string"") and self.isPasswordChange(selected) then
+        ui.dim(""  Non-destructive attempt failed - trying password-change path..."")
+        raw = freshLib.overflow(selected.address, selected.exploit, genPass)
+        if raw != null and typeof(raw) != ""string"" then
+            passwordWasChanged = true
+        end if
+    end if
+
+    if raw == null then
+        dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, ""uncertain"", kbConstraints, selected.rtype, """", """", """")
+        dbManager.save()
+        return Error.New(""Exploit returned null"", ""EXPLOIT_FAILED"")
+    end if
+    if typeof(raw) == ""string"" and raw.indexOf(""alphanumeric"") != null then
+        dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, ""uncertain"", kbConstraints, selected.rtype, """", """", """")
+        dbManager.save()
+        return Error.New(""Exploit failed: "" + raw + "" (password-change exploit with special chars)"", ""ALPHANUMERIC_ERROR"")
+    end if
+    if typeof(raw) == ""string"" then
+        dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, ""uncertain"", kbConstraints, selected.rtype, """", """", """")
+        dbManager.save()
+        return Error.New(""Exploit failed: "" + raw, ""EXPLOIT_FAILED"")
+    end if
+
+    // Wrap result
+    result = computerObjectFactory(raw)
+    if result isa Error then
+        return result
+    end if
+
+    // Determine privilege
+    privilege = ""unknown""
+    if result isa Shell then
+        comp = result.getComputer()
+        if not (comp isa Error) then
+            privilege = metaxManager.detectPrivilege(comp.computer)
+        end if
+    else if result isa Computer then
+        privilege = metaxManager.detectPrivilege(result.computer)
+    end if
+
+    // Record success in exploit KB
+    kbRtype   = typeof(result)
+    kbPath    = """"
+    kbPriv    = privilege
+    if result isa File then
+        kbPath  = result.path()
+        kbPriv  = """"
+    end if
+    dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, ""success"", kbConstraints, kbRtype, kbPath, kbPriv, """")
+
+    // Only save generated password if we actually changed it
+    // If the non-destructive path worked, the original password is intact
+    if passwordWasChanged and selected.hasIndex(""privilege"") and selected.privilege.len > 0 then
+        credData = {}
+        credData.username  = selected.privilege
+        credData.password  = genPass
+        credData.type      = ""system""
+        credData.public_ip = publicIp
+        credData.lan_ip    = lanIp
+        credData.source    = ""exploit_generated""
+        dbManager.upsertCredential(credData)
+        ui.info(""Password changed for "" + selected.privilege + "": "" + genPass)
+    end if
+
+    // Update database
+    dbManager.setTargetStatus(target.id, TARGET_STATUS.EXPLOITED)
+    targetData = {}
+    targetData.public_ip = publicIp
+    targetData.lan_ip    = lanIp
+    targetData.privilege = privilege
+    targetData.status    = TARGET_STATUS.EXPLOITED
+    dbManager.upsertTarget(targetData)
+    dbManager.save()
+
+    // Add as new session
+    newSession = sessionManager.addSession(raw, publicIp + "":"" + port)
+    if newSession isa Error then
+        return newSession
+    end if
+    sessionManager.setCurrentSession(newSession)
+
+    ui.success(""Exploit succeeded. Session opened as: "" + privilege)
+
+    // Show shinylibs notification if anything was staged during runScan
+    shinyMgr = self.mediator.getExtension(""shinyLibsManager"")
+    if shinyMgr != null and shinyMgr.db.staged.len > 0 then
+        shinyMgr.showStagedNotification()
+    end if
+
+    return result
+end function
+
+AttackManager.escalate = function()
+    // Attempt privilege escalation on current session.
+    // Strategy order:
+    //   0. Decipher /etc/passwd to surface root password
+    //   1. GCO sudo (get_shell) - works from guest, no open port required
+    //   2. Stored exploit direct root shell
+    //   3. connect_service SSH/FTP with known passwords (known ports only)
+    //   4. SCP local lib scan
+    //   5. Chainsaw password cracker via GCO RCE
+
+    ui             = self.mediator.getExtension(""corvidUi"")
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    dbManager      = self.mediator.getExtension(""databaseManager"")
+    metaxManager   = self.mediator.getExtension(""metaxploitManager"")
+    intelManager   = self.mediator.getExtension(""intelManager"")
+
+    currentSession = sessionManager.currentSession
+    handler        = currentSession.handler
+    if handler.type() != ""shell"" then
+        return Error.New(""Escalation requires a shell session"", ""TYPE_ERROR"")
+    end if
+
+    if handler.privilege() == ""root"" then
+        ui.success(""Already root."")
+        return
+    end if
+
+    ip    = currentSession.data.ip.public
+    lanIp = currentSession.data.ip.local
+    rawShell = handler.shell.shell
+
+    // Collect root passwords to try (current + native)
+    creds = dbManager.findCredentialsByIp(ip)
+    if lanIp.len > 0 and lanIp != ip then
+        lanCreds = dbManager.findCredentialsByIp(lanIp)
+        for lc in lanCreds
+            creds.push(lc)
+        end for
+    end if
+
+    rootPasswords = dbManager.extractRootPasswords(ip)
+
+    // ── Fast path: if we already have root creds, go straight to Clover ────
+    if rootPasswords.len > 0 then
+        ui.info(""Root credentials on file — attempting Clover Method directly..."")
+        // skip harvest and passwd decipher, jump straight to Strategy 1
+        // (handled below by checking rootPasswords.len before each strategy)
+    else
+        // ── Pre-strategy: harvest current session to surface credentials ───────
+        if not (intelManager isa Error) then
+            ui.info(""No root creds on file — harvesting session before escalation attempt..."")
+            harvestResult = intelManager.harvestAll(ip, lanIp, true)
+            if not (harvestResult isa Error) then
+                ui.success(""Harvest complete - credentials updated in DB"")
+                creds = dbManager.findCredentialsByIp(ip)
+                if lanIp.len > 0 and lanIp != ip then
+                    lanCreds = dbManager.findCredentialsByIp(lanIp)
+                    for lc in lanCreds
+                        creds.push(lc)
+                    end for
+                end if
+                rootPasswords = dbManager.extractRootPasswords(ip)
+            end if
+        end if
+    end if
+
+    // Load metaxploit once for all strategies
+    // Always use the current lib from libManager - this will be the roost
+    // node's lib if roost pick was used, otherwise falls back to Nest lib.
+    // Strategy 1 uses net_use which always routes from Nest regardless - skip
+    // it when on a non-pivot session to avoid exposing Nest IP.
+    metaLib = metaxManager.getMetaxploit()
+    if metaLib isa Error then
+        meta = null
+    else
+        meta = metaLib.metaxploit
+    end if
+
+    onPivot = (currentSession == sessionManager.pivotSession)
+
+    // ── Strategy 0: decipher /etc/passwd directly ────────────────────────
+    // Skip if we already have root passwords - go straight to Clover.
+    if rootPasswords.len == 0 then
+        ui.info(""Deciphering /etc/passwd..."")
+        passwdResult = intelManager.harvestPasswd(currentSession.handler, ip, lanIp)
+        if passwdResult isa Error then
+            ui.warning(""passwd: "" + passwdResult.message)
+        else
+            ui.success(""passwd: "" + str(passwdResult.cracked) + "" cracked, "" + str(passwdResult.failed) + "" failed"")
+            creds = dbManager.findCredentialsByIp(ip)
+            if lanIp.len > 0 and lanIp != ip then
+                for lc in dbManager.findCredentialsByIp(lanIp)
+                    creds.push(lc)
+                end for
+            end if
+            rootPasswords = []
+            for cred in creds
+                if cred.type != CRED_TYPES.SYSTEM then
+                    continue
+                end if
+                if cred.username != ""root"" then
+                    continue
+                end if
+                if cred.password.len > 0 and rootPasswords.indexOf(cred.password) == null then
+                    rootPasswords.push(cred.password)
+                end if
+                if cred.hasIndex(""native_pass"") and cred.native_pass.len > 0 then
+                    if rootPasswords.indexOf(cred.native_pass) == null then
+                        rootPasswords.push(cred.native_pass)
+                    end if
+                end if
+            end for
+        end if
+    else
+        ui.dim(""  Skipping passwd decipher - root credentials already on file"")
+    end if
+
+    ui.info(""Checking stored exploits for direct root shell..."")
+    targets = dbManager.findTarget(ip)
+    foundRootShell = false
+
+    // ── Strategy 1: GCO sudo (get_shell without SSH port) ────────────────
+    // First attempt - works from guest and user, no open port required.
+    // Requires a cracked root password in rootPasswords AND a writable path.
+    if rootPasswords.len > 0 then
+        ui.info(""Strategy 1: attempting escalation via Clover Method..."")
+        wp3 = findWritePerms(rawShell)
+        if wp3 == null then
+            ui.dim(""  GCO: no writable path found - skipping"")
+        else
+            sudoPass3 = rootPasswords[0]
+            q = char(34)
+            sudoSrcLines = ""cob = get_custom_object"" + char(10)
+            sudoSrcLines = sudoSrcLines + ""cob.shell = get_shell("" + q + ""root"" + q + "", "" + q + sudoPass3 + q + "")""
+            rawShell.host_computer.touch(wp3.path, ""csudo.src"")
+            sudoSrcFile = rawShell.host_computer.File(wp3.path + ""/csudo.src"")
+            if sudoSrcFile == null then
+                ui.dim(""  GCO: could not create script file - skipping"")
+            else
+                sudoSrcFile.set_content(sudoSrcLines)
+                buildResult3 = rawShell.build(wp3.path + ""/csudo.src"", wp3.path)
+                if buildResult3.len > 0 then
+                    ui.dim(""  GCO: build failed - "" + buildResult3)
+                    csudoSrc = rawShell.host_computer.File(wp3.path + ""/csudo.src"")
+                    if csudoSrc != null then
+                        csudoSrc.delete()
+                    end if
+                else
+                    rawShell.launch(wp3.path + ""/csudo"")
+                    cob3 = get_custom_object
+                    if cob3.hasIndex(""shell"") and typeof(cob3.shell) == ""shell"" then
+                        sudoShell3 = cob3.shell
+                        for s3name in [""csudo.src"", ""csudo""]
+                            s3f = rawShell.host_computer.File(wp3.path + ""/"" + s3name)
+                            if s3f != null then
+                                s3f.delete()
+                            end if
+                        end for
+                        newSess3 = sessionManager.addSession(sudoShell3, ""root@"" + ip)
+                        if not (newSess3 isa Error) then
+                            sessionManager.setCurrentSession(newSess3)
+                            targetsForUpdate = dbManager.findTarget(ip)
+                            if targetsForUpdate.len > 0 then
+                                dbManager.setTargetStatus(targetsForUpdate[0].id, TARGET_STATUS.EXPLOITED)
+                                updateData3 = {}
+                                updateData3.public_ip = ip
+                                updateData3.lan_ip    = lanIp
+                                updateData3.privilege = ""root""
+                                updateData3.status    = TARGET_STATUS.EXPLOITED
+                                dbManager.upsertTarget(updateData3)
+                            end if
+                            credUpdate3 = {}
+                            credUpdate3.type      = CRED_TYPES.SYSTEM
+                            credUpdate3.username  = ""root""
+                            credUpdate3.password  = sudoPass3
+                            credUpdate3.public_ip = ip
+                            credUpdate3.lan_ip    = lanIp
+                            credUpdate3.source    = ""sudo_escalation""
+                            dbManager.upsertCredential(credUpdate3)
+                            dbManager.save()
+                            ui.success(""Escalated to root via Clover Method"")
+                            return newSess3
+                        end if
+                    else
+                        ui.dim(""  GCO: get_shell returned no shell - skipping"")
+                        for s3name in [""csudo.src"", ""csudo""]
+                            s3f2 = rawShell.host_computer.File(wp3.path + ""/"" + s3name)
+                            if s3f2 != null then
+                                s3f2.delete()
+                            end if
+                        end for
+                    end if
+                end if
+            end if
+        end if
+    else
+        ui.dim(""  GCO: no cracked root password available - skipping"")
+    end if
+
+    // ── Strategy 2: stored exploit direct root shell ──────────────────────
+    if true then
+        for tgt in targets
+            if foundRootShell then
+                break
+            end if
+            if not tgt.hasIndex(""exploit_db"") then
+                continue
+            end if
+            for libKey in tgt.exploit_db.indexes
+                if foundRootShell then
+                    break
+                end if
+                for ex in tgt.exploit_db[libKey]
+                    if ex.rtype != ""shell"" then
+                        continue
+                    end if
+                    if ex.privilege != ""root"" then
+                        continue
+                    end if
+                    targetPort = 0
+                    for pr in tgt.ports
+                        lm = pr.service + ""_"" + pr.version
+                        if libKey.indexOf(lm) != null then
+                            targetPort = pr.port
+                        end if
+                    end for
+                    if targetPort == 0 then
+                        continue
+                    end if
+                    if meta == null then
+                        continue
+                    end if
+                    netSess = meta.net_use(ip, targetPort)
+                    if not netSess then
+                        continue
+                    end if
+                    rawLib = netSess.dump_lib
+                    if not rawLib then
+                        continue
+                    end if
+                    result = rawLib.overflow(ex.address, ex.exploit)
+                    if result == null or typeof(result) == ""string"" then
+                        continue
+                    end if
+                    if typeof(result) != ""shell"" then
+                        continue
+                    end if
+                    newSession = sessionManager.addSession(result, ""root@"" + ip)
+                    if newSession isa Error then
+                        continue
+                    end if
+                    sessionManager.setCurrentSession(newSession)
+                    ui.success(""Escalated to root via direct exploit on port "" + str(targetPort))
+                    foundRootShell = true
+                    return newSession
+                end for
+            end for
+        end for
+    end if
+
+    // ── Strategy 3: connect_service SSH and FTP ports ─────────────────────
+    // Only tries ports actually found on the target - no blind port 22/21
+    // fallback since GCO already handles the no-SSH case above.
+    sshPorts = []
+    ftpPorts = []
+    for tgt in targets
+        if not tgt.hasIndex(""ports"") then
+            continue
+        end if
+        for pr in tgt.ports
+            if pr.service == ""ssh"" then
+                alreadyIn = false
+                for ep in sshPorts
+                    if ep.port == pr.port then
+                        alreadyIn = true
+                    end if
+                end for
+                if not alreadyIn then
+                    sshPorts.push(pr)
+                end if
+            else if pr.service == ""ftp"" then
+                alreadyIn = false
+                for ep in ftpPorts
+                    if ep.port == pr.port then
+                        alreadyIn = true
+                    end if
+                end for
+                if not alreadyIn then
+                    ftpPorts.push(pr)
+                end if
+            end if
+        end for
+    end for
+
+    if rootPasswords.len == 0 then
+        ui.warning(""No root credentials found - skipping connect_service attempts"")
+    else
+        ui.info(""Trying "" + str(rootPasswords.len) + "" root password(s) across available service ports..."")
+        for pass in rootPasswords
+            for portRec in sshPorts
+                ui.info(""  Trying ssh port "" + str(portRec.port) + "" with password: "" + pass + ""..."")
+                result = rawShell.connect_service(ip, portRec.port, ""root"", pass, ""ssh"")
+                if typeof(result) == ""shell"" then
+                    newSession = sessionManager.addSession(result, ""root@"" + ip)
+                    if not (newSession isa Error) then
+                        sessionManager.setCurrentSession(newSession)
+                        ui.success(""Escalated to root via ssh port "" + str(portRec.port))
+                        return newSession
+                    end if
+                end if
+            end for
+            for portRec in ftpPorts
+                ui.info(""  Trying ftp port "" + str(portRec.port) + "" with password: "" + pass + ""..."")
+                result = rawShell.connect_service(ip, portRec.port, ""root"", pass, ""ftp"")
+                if typeof(result) == ""shell"" then
+                    newSession = sessionManager.addSession(result, ""ftp-root@"" + ip)
+                    if not (newSession isa Error) then
+                        sessionManager.setCurrentSession(newSession)
+                        ui.success(""Got ftp root access on port "" + str(portRec.port))
+                        return newSession
+                    end if
+                end if
+            end for
+        end for
+    end if
+
+    // ── Strategy 4: SCP local lib scan ─────────────────────────────────
+    // Pull target's .so files to Nest, scan with metaxploit, try overflows
+    // against target's open ports. Records all results in exploit KB.
+    ui.info(""Strategy 4: scanning target local libraries via SCP..."")
+    pivotSession2 = sessionManager.pivotSession
+    pivotHandler2 = pivotSession2.handler
+    pivotShell2   = pivotHandler2.shell.shell
+    nestComp      = pivotShell2.host_computer
+
+    // Get target lib folder
+    targetLibFolder = handler.getFile(""/lib"")
+    localLibWorked  = false
+
+    if not (targetLibFolder isa Error) then
+        libFiles = targetLibFolder.children()
+        if libFiles != null then
+            scannedLibs = []
+            for lf in libFiles
+                lfName = lf.name()
+                if lfName.indexOf("".so"") == null then
+                    continue
+                end if
+                if lf.isBinary() == false then
+                    continue
+                end if
+
+                // SCP the lib file to Nest /tmp
+                scpDest = ""/shiny/"" + lfName
+                scpErr = pivotShell2.scp(lf.path(), ""/shiny"", handler.shell.shell)
+                if typeof(scpErr) == ""string"" and scpErr.len > 0 then
+                    continue
+                end if
+
+                // Load it on Nest with metaxploit
+                if meta == null then
+                    continue
+                end if
+                nestLib = meta.load(scpDest)
+                if nestLib == null then
+                    // Clean up and skip
+                    tmpF = nestComp.File(scpDest)
+                    if tmpF != null then
+                        tmpF.delete()
+                    end if
+                    continue
+                end if
+
+                ui.info(""  Scanning "" + lfName + "" v"" + nestLib.version + ""..."")
+                scannedLibs.push(scpDest)
+
+                // Scan for vulnerable addresses
+                addresses = meta.scan(nestLib)
+                if addresses == null or addresses.len == 0 then
+                    continue
+                end if
+
+                // Try each address against all open ports on target
+                for addr in addresses
+                    scanText = meta.scan_address(nestLib, addr)
+                    if scanText == null then
+                        continue
+                    end if
+
+                    // Parse exploit names
+                    vulnNames = []
+                    chunks = scanText.split(""Unsafe check: "")
+                    for chunk in chunks
+                        if chunk == chunks[0] then
+                            continue
+                        end if
+                        bStart = chunk.indexOf(""<b>"")
+                        bEnd   = chunk.indexOf(""</b>"")
+                        if bStart != null and bEnd != null then
+                            vn = chunk[bStart+3:bEnd]
+                            if vn.len > 0 then
+                                vulnNames.push(vn)
+                            end if
+                        end if
+                    end for
+
+                    for vn in vulnNames
+                        // Try overflow - no port needed for local lib
+                        result4 = nestLib.overflow(addr, vn)
+                        if result4 == null then
+                            continue
+                        end if
+                        r4Type = typeof(result4)
+                        if r4Type == ""string"" then
+                            continue
+                        end if
+
+                        // Record in KB
+                        kbLibName4  = nestLib.lib_name
+                        kbLibVer4   = nestLib.version
+                        r4Priv = """"
+                        if r4Type == ""shell"" then
+                            r4Priv = ""user""
+                        end if
+                        dbManager.kbRecord(kbLibName4, kbLibVer4, addr, vn, ""success"", [], r4Type, """", r4Priv, ip)
+                        dbManager.save()
+
+                        ui.success(""  Local lib hit: "" + lfName + "" / "" + vn + "" -> "" + r4Type)
+
+                        if r4Type == ""shell"" then
+                            newSess4 = sessionManager.addSession(result4, ""user@"" + ip)
+                            if not (newSess4 isa Error) then
+                                sessionManager.setCurrentSession(newSess4)
+                                localLibWorked = true
+                                // Clean up scp'd files
+                                for scpPath in scannedLibs
+                                    cF = nestComp.File(scpPath)
+                                    if cF != null then
+                                        cF.delete()
+                                    end if
+                                end for
+                                ui.success(""Got user shell via local lib exploit on "" + ip)
+                                return newSess4
+                            end if
+                        end if
+                    end for
+                end for
+
+                // Clean up this lib from Nest /tmp
+                tmpF2 = nestComp.File(scpDest)
+                if tmpF2 != null then
+                    tmpF2.delete()
+                end if
+            end for
+
+            // Clean up any remaining scp'd files
+            for scpPath in scannedLibs
+                cF2 = nestComp.File(scpPath)
+                if cF2 != null then
+                    cF2.delete()
+                end if
+            end for
+        end if
+    end if
+
+    if localLibWorked then
+        return
+    end if
+
+    // ── Strategy 5: Chainsaw via GCO RCE ───────────────────────────────────
+    // SCP chainsaw binary to target, run it there via RCE.
+    // Chainsaw loads into GCO on target, cracks root locally, returns shell.
+    ui.info(""Chainsaw: attempting escalation via GCO RCE..."")
+    csBinPath = ""/Corvid/tools/chainsaw/chainsaw""
+    csBinFile = sessionManager.pivotSession.handler.getFile(csBinPath)
+    if csBinFile isa Error then
+        ui.dim(""  Chainsaw binary not found - run: chainsaw build"")
+    else
+        wp = findWritePerms(rawShell)
+        if wp != null then
+            // SCP chainsaw binary to target
+            pivotShell = sessionManager.pivotSession.handler.shell.shell
+            scpResult = pivotShell.scp(csBinPath, wp.path, rawShell)
+            if typeof(scpResult) == ""string"" and scpResult.len > 0 then
+                ui.dim(""  Chainsaw RCE: SCP failed - "" + scpResult)
+            else
+                // Write RCE script that loads chainsaw and cracks
+                q = char(34)
+                nl = char(10)
+                rceLines = ""chainsaw = get_custom_object.chainsaw"" + nl
+                rceLines = rceLines + ""chainsaw.init()"" + nl
+                rceLines = rceLines + ""chainsaw.crack()""
+                rawShell.host_computer.touch(wp.path, ""cs_esc.src"")
+                rceFile = rawShell.host_computer.File(wp.path + ""/cs_esc.src"")
+                if rceFile != null then
+                    rceFile.set_content(rceLines)
+                    // Launch chainsaw binary first (--load puts it in GCO)
+                    rawShell.launch(wp.path + ""/chainsaw"", ""load"")
+                    // Build and run RCE script
+                    buildResult = rawShell.build(wp.path + ""/cs_esc.src"", wp.path)
+                    if buildResult.len == 0 then
+                        rawShell.launch(wp.path + ""/cs_esc"")
+                        if get_custom_object.hasIndex(""chainsaw"") and get_custom_object.chainsaw != null then
+                            csRceShell = get_custom_object.chainsaw.shell
+                            csRcePass  = get_custom_object.chainsaw.password
+                            if typeof(csRceShell) == ""shell"" then
+                                ui.success(""Chainsaw RCE cracked root password: "" + csRcePass)
+                                csRceCredData = {}
+                                csRceCredData.type      = CRED_TYPES.SYSTEM
+                                csRceCredData.username  = ""root""
+                                csRceCredData.password  = csRcePass
+                                csRceCredData.public_ip = ip
+                                csRceCredData.lan_ip    = lanIp
+                                csRceCredData.source    = ""chainsaw""
+                                dbManager.upsertCredential(csRceCredData)
+                                dbManager.save()
+                                // Clean up
+                                for cleanName in [""chainsaw"", ""cs_esc.src"", ""cs_esc""]
+                                    cf = rawShell.host_computer.File(wp.path + ""/"" + cleanName)
+                                    if cf != null then
+                                        cf.delete()
+                                    end if
+                                end for
+                                newSessRce = sessionManager.addSession(csRceShell, ""root@"" + ip)
+                                if not (newSessRce isa Error) then
+                                    sessionManager.setCurrentSession(newSessRce)
+                                    ui.success(""Escalated to root via Chainsaw RCE"")
+                                    return newSessRce
+                                end if
+                            end if
+                        end if
+                    else
+                        ui.dim(""  Chainsaw RCE: build failed - "" + buildResult)
+                    end if
+                    // Clean up regardless
+                    for cleanName in [""chainsaw"", ""cs_esc.src"", ""cs_esc""]
+                        cf2 = rawShell.host_computer.File(wp.path + ""/"" + cleanName)
+                        if cf2 != null then
+                            cf2.delete()
+                        end if
+                    end for
+                end if
+            end if
+        else
+            ui.dim(""  Chainsaw RCE: no writable path found"")
+        end if
+    end if
+
+    // ── All strategies exhausted ─────────────────────────────────────────
+    ui.warning(""Auto-escalation failed on all paths."")
+    ui.print("""")
+    if rootPasswords.len > 0 then
+        ui.info(""Root password(s) found - try manually:"")
+        for pass in rootPasswords
+            ui.success(""  sudo -s  ->  "" + pass)
+        end for
+    end if
+    ui.info(""Tips:"")
+    ui.print(""  portfwd add 2222 22 "" + lanIp + ""  then re-run escalate"")
+    ui.print(""  Or activate a native terminal and run: sudo -s"")
+    return Error.New(""Auto-escalation failed - manual sudo required"", ""MANUAL_REQUIRED"")
+end function
+
+AttackManager.isPasswordChange = function(r)
+    // A password-change exploit has privilege set to the username whose password is changed
+    // (not root, guest, none, unknown, or empty)
+    if not r.hasIndex(""privilege"") then
+        return false
+    end if
+    p = r.privilege
+    if p.len == 0 then
+        return false
+    end if
+    if p == ""root"" or p == ""guest"" or p == ""none"" or p == ""unknown"" then
+        return false
+    end if
+    return true
+end function
+
+AttackManager.autoSelectBest = function(results)
+    // Pass 1: root shell, non-password-change
+    for r in results
+        if r.rtype == ""shell"" and r.privilege == ""root"" and not self.isPasswordChange(r) then
+            return r
+        end if
+    end for
+    // Pass 2: any shell, non-password-change
+    for r in results
+        if r.rtype == ""shell"" and not self.isPasswordChange(r) then
+            return r
+        end if
+    end for
+    // Pass 3: root computer, non-password-change
+    for r in results
+        if r.rtype == ""computer"" and r.privilege == ""root"" and not self.isPasswordChange(r) then
+            return r
+        end if
+    end for
+    // Pass 4: any computer, non-password-change
+    for r in results
+        if r.rtype == ""computer"" and not self.isPasswordChange(r) then
+            return r
+        end if
+    end for
+    // Pass 5: file result
+    for r in results
+        if r.rtype == ""file"" then
+            return r
+        end if
+    end for
+    // Pass 6: password-change exploits as last resort
+    for r in results
+        if r.rtype == ""shell"" and r.privilege == ""root"" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == ""shell"" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == ""computer"" then
+            return r
+        end if
+    end for
+    return null
+end function
+
+AttackManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+AttackManager.New = function()
+    result = new AttackManager
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/bounce-manager.txt","// ============================================================
+// CORVID | managers/bounce/bounce-manager
+// Manages bounce chain sessions.
+// Bounce points are sessions tagged with bounce metadata.
+// Handles chain building, verification, and cleanup.
+// ============================================================
+
+BOUNCE_TYPES = {}
+BOUNCE_TYPES.OWNED       = ""owned""
+BOUNCE_TYPES.COMPROMISED = ""compromised""
+
+BounceManager = {}
+BounceManager.mediator = null
+
+BounceManager.getBounceTargets = function()
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    return dbManager.findBounces()
+end function
+
+BounceManager.addBounce = function(publicIp, lanIp, port, username, password, bounceType, sourceIp)
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    ui        = self.mediator.getExtension(""corvidUi"")
+
+    if bounceType == null then
+        bounceType = BOUNCE_TYPES.COMPROMISED
+    end if
+
+    // Avoid creating a duplicate target record. If a record for this public_ip
+    // already exists, reuse its lan_ip so upsert's matchExisting succeeds and
+    // we update the existing row instead of inserting a second one.
+    existingForIp = dbManager.findTarget(publicIp)
+    if existingForIp.len > 0 then
+        rec0 = existingForIp[0]
+        if rec0.hasIndex(""lan_ip"") and rec0.lan_ip.len > 0 then
+            // Existing record has a lan_ip - reuse it
+            lanIp = rec0.lan_ip
+        end if
+    end if
+
+    portRecord = {}
+    portRecord.port      = port
+    portRecord.service   = ""ssh""
+    portRecord.version   = ""unknown""
+    portRecord.forwarded = true
+    portRecord.exploited = true
+
+    targetData = {}
+    targetData.public_ip = publicIp
+    targetData.lan_ip    = lanIp
+    targetData.status    = TARGET_STATUS.BOUNCE
+    targetData.ports     = [portRecord]
+    // Don't append notes - existing record will keep its notes via upsert merge
+    // Only set notes on new records (upsert handles merge)
+    targetData.notes     = """"
+
+    id = dbManager.upsertTarget(targetData)
+
+    // Set the bounce marker only if not already present
+    existing = dbManager.findTarget(publicIp)
+    if existing.len > 0 then
+        rec = existing[0]
+        existingNotes = """"
+        if rec.hasIndex(""notes"") then
+            existingNotes = rec.notes
+        end if
+        if existingNotes.indexOf(""bounce:"" + bounceType) == null then
+            dbManager.addNote(""target"", rec.id, ""bounce:"" + bounceType + "" source:"" + sourceIp)
+        end if
+    end if
+
+    // Store SSH credentials. Use ""owned"" as source - ""hardened"" is reserved for
+    // credentials that have actually been rotated by `bounces harden`.
+    credData = {}
+    credData.type      = ""system""
+    credData.username  = username
+    credData.password  = password
+    credData.public_ip = publicIp
+    credData.lan_ip    = lanIp
+    credData.source    = ""owned""
+    dbManager.upsertCredential(credData)
+    dbManager.save()
+
+    ui.success(""Bounce point added: "" + publicIp + "" ("" + bounceType + "")"")
+    return id
+end function
+
+BounceManager.listBounces = function()
+    return self.getBounceTargets()
+end function
+
+BounceManager.verifyBounce = function(target)
+    ui           = self.mediator.getExtension(""corvidUi"")
+    dbManager    = self.mediator.getExtension(""databaseManager"")
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+
+    // Find SSH credentials using helper
+    sshCreds = dbManager.findRootSshCredentials(target.public_ip)
+    sshPass = sshCreds.password
+    sshNative = sshCreds.native_pass
+
+    if sshPass.len == 0 and sshNative.len == 0 then
+        ui.warning(""No credentials found for: "" + target.public_ip)
+        return false
+    end if
+
+    sshPort = 22
+    for port in target.ports
+        if port.service == ""ssh"" then
+            sshPort = port.port
+        end if
+    end for
+
+    // Attempt connection - try current password then native_pass
+    pivotShell = sessionManager.pivotSession.handler.shell
+    result = null
+    if sshPass.len > 0 then
+        result = pivotShell.shell.connect_service(target.public_ip, sshPort, ""root"", sshPass, ""ssh"")
+    end if
+    if typeof(result) != ""shell"" and sshNative.len > 0 and sshNative != sshPass then
+        result = pivotShell.shell.connect_service(target.public_ip, sshPort, ""root"", sshNative, ""ssh"")
+    end if
+    if typeof(result) == ""shell"" then
+        ui.success(""Bounce verified: "" + target.public_ip)
+        return true
+    else
+        ui.warning(""Bounce unreachable: "" + target.public_ip + ""  -  "" + str(result))
+        return false
+    end if
+end function
+
+BounceManager.verifyAll = function()
+    bounces = self.getBounceTargets()
+    if bounces.len == 0 then
+        return Error.New(""No bounce points configured"", ""EMPTY"")
+    end if
+    results = {}
+    for bTarget in bounces
+        results[bTarget.public_ip] = self.verifyBounce(bTarget)
+    end for
+    return results
+end function
+
+BounceManager.connect = function(target)
+    // Establish a session through a bounce point
+    ui             = self.mediator.getExtension(""corvidUi"")
+    dbManager      = self.mediator.getExtension(""databaseManager"")
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+
+    sshCreds = dbManager.findRootSshCredentials(target.public_ip)
+    sshPass = sshCreds.password
+    sshNative = sshCreds.native_pass
+
+    if sshPass.len == 0 and sshNative.len == 0 then
+        return Error.New(""No credentials for bounce point: "" + target.public_ip, ""NO_CREDS"")
+    end if
+
+    sshPort = 22
+    for port in target.ports
+        if port.service == ""ssh"" then
+            sshPort = port.port
+        end if
+    end for
+
+    currentShell = sessionManager.currentSession.handler.shell
+    newShell = null
+    if sshPass.len > 0 then
+        newShell = currentShell.shell.connect_service(target.public_ip, sshPort, ""root"", sshPass, ""ssh"")
+    end if
+    if typeof(newShell) != ""shell"" and sshNative.len > 0 and sshNative != sshPass then
+        newShell = currentShell.shell.connect_service(target.public_ip, sshPort, ""root"", sshNative, ""ssh"")
+    end if
+
+    if typeof(newShell) != ""shell"" then
+        return Error.New(""Could not connect to bounce: "" + target.public_ip + ""  -  "" + str(newShell), ""CONNECT_ERROR"")
+    end if
+
+    newSession = sessionManager.addSession(newShell, ""bounce@"" + target.public_ip)
+    if newSession isa Error then
+        return newSession
+    end if
+    sessionManager.setCurrentSession(newSession)
+    ui.success(""Connected through bounce: "" + target.public_ip)
+    return newSession
+end function
+
+BounceManager.cleanBounce = function(target)
+    // Clean logs on a bounce machine and disconnect
+    ui             = self.mediator.getExtension(""corvidUi"")
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+
+    notes = target.notes
+    bounceType = BOUNCE_TYPES.COMPROMISED
+    if notes.indexOf(""bounce:owned"") != null then
+        bounceType = BOUNCE_TYPES.OWNED
+    end if
+
+    if bounceType == BOUNCE_TYPES.OWNED then
+        // Owned  -  wipe all logs freely
+        handler = sessionManager.currentSession.handler
+        result  = handler.corruptLogs()
+        if result isa Error then
+            ui.warning(""Log wipe failed: "" + result.message)
+        else
+            ui.success(""Logs wiped on owned bounce: "" + target.public_ip)
+        end if
+    else
+        // Compromised  -  manual checklist only
+        ui.print("""")
+        ui.info(""Bounce cleanup checklist for COMPROMISED machine "" + target.public_ip + "":"")
+        ui.print(""  1. cd /var"")
+        ui.print(""  2. LogViewer.exe system.log"")
+        ui.print(""  3. Delete: shell obtained, connection routed entries"")
+        ui.print(""  4. Keep: connect and disconnect entries"")
+        ui.print(""  5. Verify nothing else is suspicious"")
+        ui.print("""")
+    end if
+end function
+
+BounceManager.removeBounce = function(publicIp)
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    ui        = self.mediator.getExtension(""corvidUi"")
+
+    // CRITICAL: use findBounces + filter by IP, NOT findTarget()
+    // findTarget uses ipIndex which only holds ONE record per public IP -
+    // it would return the router record, not the bounce record
+    allBounces = dbManager.findBounces()
+    targets = []
+    for b in allBounces
+        if b.hasIndex(""public_ip"") and b.public_ip == publicIp then
+            targets.push(b)
+        end if
+    end for
+
+    if targets.len == 0 then
+        return Error.New(""Bounce not found: "" + publicIp, ""NOT_FOUND"")
+    end if
+
+    // Update each matching bounce record directly via targetDb
+    for target in targets
+        target.status = TARGET_STATUS.OWNED
+        existingNotes = """"
+        if target.hasIndex(""notes"") then
+            existingNotes = target.notes
+        end if
+        if existingNotes.indexOf(""removed_bounce"") == null then
+            if existingNotes.len > 0 then
+                existingNotes = existingNotes + char(10)
+            end if
+            target.notes = existingNotes + ""removed_bounce""
+        end if
+        dbManager.targetDb.db.set(target.id, target)
+        dbManager.targetDb.db.dirty = true
+    end for
+
+    dbManager.save()
+    ui.success(""Bounce removed: "" + publicIp)
+end function
+
+BounceManager.findBounce = function(publicIp)
+    bounces = self.getBounceTargets()
+    for b in bounces
+        if b.hasIndex(""public_ip"") and b.public_ip == publicIp then
+            return b
+        end if
+    end for
+    return null
+end function
+
+BounceManager.setStatus = function(publicIp, status)
+    dbManager = self.mediator.getExtension(""databaseManager"")
+    bounces = self.getBounceTargets()
+    for b in bounces
+        if b.hasIndex(""public_ip"") and b.public_ip == publicIp then
+            // Store health in notes, NOT in status
+            // status must stay ""bounce"" so findBounces() keeps finding this record
+            existingNotes = """"
+            if b.hasIndex(""notes"") then
+                existingNotes = b.notes
+            end if
+            // Replace health marker - use direct DB set to avoid upsert status protection
+            newNotes = """"
+            for part in existingNotes.split("" "")
+                trimPart = part.trim
+                if trimPart.len > 0 and trimPart.indexOf(""health:"") != 0 then
+                    if newNotes.len > 0 then
+                        newNotes = newNotes + "" ""
+                    end if
+                    newNotes = newNotes + trimPart
+                end if
+            end for
+            if newNotes.len > 0 then
+                newNotes = newNotes + "" ""
+            end if
+            newNotes = newNotes + ""health:"" + status
+            b.notes = newNotes
+            dbManager.targetDb.db.set(b.id, b)
+            dbManager.targetDb.db.dirty = true
+            dbManager.save()
+            return true
+        end if
+    end for
+    return false
+end function
+
+BounceManager.getHealth = function(b)
+    if not b.hasIndex(""notes"") then
+        return ""unknown""
+    end if
+    for part in b.notes.split("" "")
+        if part.indexOf(""health:"") == 0 then
+            return part[7:]
+        end if
+    end for
+    return ""unknown""
+end function
+
+BounceManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+BounceManager.New = function()
+    result = new BounceManager
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/roost-db.txt","// ============================================================
+// CORVID | managers/roost/roost-db
+// Database collection for roost nodes.
+// Stored separately from bounce pool.
+// ============================================================
+
+RoostDb = {}
+RoostDb.records = []
+RoostDb.mediator = null
+
+ROOST_STATUS = {}
+ROOST_STATUS.ACTIVE   = ""active""
+ROOST_STATUS.DORMANT  = ""dormant""
+ROOST_STATUS.DEAD     = ""dead""
+
+RoostDb.add = function(publicIp, lanIp, processName)
+    // Check for duplicate
+    for r in self.records
+        if r.public_ip == publicIp then
+            r.status = ROOST_STATUS.ACTIVE
+            r.process_name = processName
+            r.last_used = 0
+            return r
+        end if
+    end for
+    record = {}
+    record.public_ip     = publicIp
+    record.lan_ip        = lanIp
+    record.process_name  = processName
+    record.status        = ROOST_STATUS.ACTIVE
+    record.last_used     = 0
+    self.records.push(record)
+    return record
+end function
+
+RoostDb.remove = function(publicIp)
+    for i in range(0, self.records.len - 1)
+        if self.records[i].public_ip == publicIp then
+            self.records.remove(i)
+            return true
+        end if
+    end for
+    return false
+end function
+
+RoostDb.find = function(publicIp)
+    for r in self.records
+        if r.public_ip == publicIp then
+            return r
+        end if
+    end for
+    return null
+end function
+
+RoostDb.setStatus = function(publicIp, status)
+    r = self.find(publicIp)
+    if r != null then
+        r.status = status
+    end if
+end function
+
+RoostDb.markUsed = function(publicIp)
+    r = self.find(publicIp)
+    if r != null then
+        r.last_used = time
+    end if
+end function
+
+RoostDb.listActive = function()
+    result = []
+    for r in self.records
+        if r.status == ROOST_STATUS.ACTIVE then
+            result.push(r)
+        end if
+    end for
+    return result
+end function
+
+RoostDb.pickLeastUsed = function()
+    active = self.listActive()
+    if active.len == 0 then
+        return null
+    end if
+    best = active[0]
+    for r in active
+        if r.last_used < best.last_used then
+            best = r
+        end if
+    end for
+    return best
+end function
+
+RoostDb.load = function(data)
+    if data == null then
+        return
+    end if
+    if data.hasIndex(""roost"") then
+        self.records = data.roost
+    end if
+end function
+
+RoostDb.save = function(data)
+    data.roost = self.records
+end function
+
+RoostDb.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+",1)
+m("/Corvid/asriN/managers/roost-manager.txt","// ============================================================
+// CORVID | managers/roost/roost-manager
+// Manages the roost node pool.
+// Handles deploy, adopt, pick, verify, nuke operations.
+// Inspired by Scion/Arborist by NitroCynic (MIT License).
+// ============================================================
+
+RoostManager = {}
+RoostManager.mediator = null
+RoostManager.db = null
+
+ROOST_PROCESS_NAMES = [""stick"", ""shiny"", ""grub"", ""wing""]
+
+RoostManager.init = function()
+    self.db = RoostDb
+    self.db.setMediator(self.mediator)
+end function
+
+RoostManager.randomProcessName = function()
+    idx = floor(time * 13) % ROOST_PROCESS_NAMES.len
+    return ROOST_PROCESS_NAMES[idx]
+end function
+
+RoostManager.list = function()
+    return self.db.records
+end function
+
+RoostManager.listActive = function()
+    return self.db.listActive()
+end function
+
+RoostManager.add = function(publicIp, lanIp, processName)
+    return self.db.add(publicIp, lanIp, processName)
+end function
+
+RoostManager.remove = function(publicIp)
+    return self.db.remove(publicIp)
+end function
+
+RoostManager.find = function(publicIp)
+    return self.db.find(publicIp)
+end function
+
+RoostManager.setStatus = function(publicIp, status)
+    self.db.setStatus(publicIp, status)
+end function
+
+RoostManager.markUsed = function(publicIp)
+    self.db.markUsed(publicIp)
+end function
+
+RoostManager.pickLeastUsed = function()
+    return self.db.pickLeastUsed()
+end function
+
+RoostManager.load = function(data)
+    self.db.load(data)
+end function
+
+RoostManager.save = function(data)
+    self.db.save(data)
+end function
+
+RoostManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+RoostManager.New = function()
+    result = new RoostManager
+    return result
+end function
+
+// ── adoptNode ────────────────────────────────────────────────
+// Shared adoption logic used by both roost pick and roost adopt.
+// Finds the flock connection, creates a session, loads node metaxploit.
+RoostManager.adoptNode = function(node, mediator)
+    ui             = mediator.getExtension(""corvidUi"")
+    sessionManager = mediator.getExtension(""sessionManager"")
+    dbManager      = mediator.getExtension(""databaseManager"")
+    libManager     = mediator.getExtension(""libManager"")
+
+    ui.info(""Connecting to: "" + node.public_ip + "" (process: "" + node.process_name + "")"")
+
+    // Find this node in active flock connections
+    meta = include_lib(""/lib/metaxploit.so"")
+    if meta == null then
+        return Error.New(""metaxploit.so not available"", ""NO_META"")
+    end if
+
+    shells = meta.rshell_server()
+    if shells == null or shells.len == 0 then
+        return Error.New(""No active flock connections - node may be dead"", ""NO_RSHELL"")
+    end if
+
+    targetShell = null
+    for sh in shells
+        if typeof(sh) != ""shell"" then
+            continue
+        end if
+        comp = sh.host_computer
+        if comp != null then
+            if comp.public_ip == node.public_ip and comp.local_ip == node.lan_ip then
+                targetShell = sh
+                break
+            end if
+        end if
+    end for
+
+    if targetShell == null then
+        // Fallback: match on public IP only, prefer root
+        for sh in shells
+            if typeof(sh) != ""shell"" then
+                continue
+            end if
+            comp = sh.host_computer
+            if comp != null then
+                if comp.public_ip == node.public_ip then
+                    rootDir = sh.host_computer.File(""/root"")
+                    if rootDir != null and rootDir.has_permission(""w"") then
+                        targetShell = sh
+                        break
+                    end if
+                end if
+            end if
+        end for
+    end if
+
+    if targetShell == null then
+        dbManager.roostDb.setStatus(node.public_ip, ROOST_STATUS.DEAD)
+        dbManager.save()
+        return Error.New(""Could not find flock connection for "" + node.public_ip + "" - marked dead"", ""NO_SHELL"")
+    end if
+
+    // Adopt as session
+    newSession = sessionManager.addSession(targetShell, ""roost@"" + node.public_ip)
+    if newSession isa Error then
+        return newSession
+    end if
+    sessionManager.setCurrentSession(newSession)
+    dbManager.roostDb.markUsed(node.public_ip)
+    dbManager.save()
+
+    // Load roost node's local metaxploit as current lib
+    ui.info(""Loading roost node metaxploit library..."")
+    pivotHandler = sessionManager.pivotSession.handler
+    pivotShell   = pivotHandler.shell.shell
+
+    nodeMetaFile = targetShell.host_computer.File(""/lib/metaxploit.so"")
+    if nodeMetaFile != null then
+        scpDest = ""/shiny/metaxploit.so""
+        scpErr  = pivotShell.scp(""/lib/metaxploit.so"", ""/shiny"", targetShell)
+        if typeof(scpErr) != ""string"" or scpErr.len == 0 then
+            nestComp    = pivotShell.host_computer
+            rawNodeMeta = include_lib(scpDest)
+            if rawNodeMeta != null then
+                nodeIpData       = {}
+                nodeIpData.ip    = {""public"": node.public_ip, ""local"": node.lan_ip}
+                nodeIpData.path  = scpDest
+                nodeLib = libManager.addLib(rawNodeMeta, nodeIpData)
+                if not (nodeLib isa Error) then
+                    libManager.setCurrentLib(nodeLib)
+                    ui.success(""Roost node metaxploit loaded (v"" + rawNodeMeta.version + "")"")
+                else
+                    ui.dim(""  Could not register node lib: "" + nodeLib.message)
+                end if
+            else
+                ui.dim(""  include_lib failed for node metaxploit - using Nest lib"")
+            end if
+            cleanFile = nestComp.File(scpDest)
+            if cleanFile != null then
+                cleanFile.delete()
+            end if
+        else
+            ui.dim(""  Could not SCP node metaxploit - using Nest lib"")
+        end if
+    else
+        ui.dim(""  Node has no /lib/metaxploit.so - using Nest lib"")
+    end if
+
+    ui.success(""Now on roost node: "" + node.public_ip)
+    ui.info(""Run attack commands from here. All connections originate from this node."")
+    ui.separator()
+end function
+",1)
+m("/Corvid/asriN/managers/platform-manager.txt","// ============================================================
+// CORVID | managers/platform-manager
+// Manages attack platform mode. When active, exploit traffic
+// originates from a roost node rather than the Nest.
+// Corvid continues running on Nest - DB, sessions, and UI
+// are all unaffected. Only net_use calls are rerouted.
+//
+// Requires: metaxploit.so and crypto.so on the roost node.
+// If not present, they are uploaded from Nest automatically.
+// Tracks what was uploaded so wipe() removes only those files.
+// ============================================================
+
+PlatformManager = {}
+PlatformManager.mediator        = null
+PlatformManager.active          = false
+PlatformManager.nodeIp          = """"    // IP of the active platform node
+PlatformManager.roostShell      = null  // raw shell on node
+PlatformManager.roostMeta       = null  // Metaxploit facade loaded from node
+PlatformManager.roostCrypto     = null  // Crypto facade loaded from node
+PlatformManager.uploadedMeta    = false // true if we had to upload metaxploit.so
+PlatformManager.uploadedCrypto  = false // true if we had to upload crypto.so
+PlatformManager.metaPath        = """"    // path to metaxploit.so on node
+PlatformManager.cryptoPath      = """"    // path to crypto.so on node
+
+// ── activate ────────────────────────────────────────────────────────────────
+// Activates platform mode on the current session. The current session's
+// machine becomes the attack origin for all net_use calls.
+// Use roost pick, bounces chain, or flock adopt first to position yourself
+// on the desired node, then run platform deploy.
+
+PlatformManager.activate = function()
+    ui             = self.mediator.getExtension(""corvidUi"")
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    pivotSession   = sessionManager.pivotSession
+    pivotHandler   = pivotSession.handler
+    pivotShell     = pivotHandler.shell.shell
+    currentSession = sessionManager.currentSession
+
+    if self.active then
+        ui.warning(""Platform already deployed on "" + self.nodeIp + "" - run: platform wipe  or  platform sleep  first"")
+        return Error.New(""Already active"", ""ALREADY_ACTIVE"")
+    end if
+
+    if currentSession == pivotSession then
+        return Error.New(""Cannot deploy platform on Nest - switch to a remote session first"", ""IS_NEST"")
+    end if
+
+    handler    = currentSession.handler
+    nodeShell  = handler.shell.shell
+    nodeComp   = nodeShell.host_computer
+    nodeIp     = currentSession.data.ip.public
+
+    ui.info(""Activating platform on current session: "" + nodeIp + ""..."")
+
+    // ── Ensure /shiny exists on node ─────────────────────────────────────
+    shinyDir = nodeComp.File(""/shiny"")
+    if shinyDir == null then
+        nodeComp.create_folder(""/"", ""shiny"")
+    end if
+
+    // ── Ensure metaxploit.so is available ────────────────────────────────
+    metaFile = nodeComp.File(""/lib/metaxploit.so"")
+    if metaFile == null then
+        metaFile = nodeComp.File(""/usr/lib/metaxploit.so"")
+    end if
+
+    if metaFile == null then
+        ui.info(""  metaxploit.so not found on node - uploading from Nest..."")
+        nestMeta = pivotHandler.getFile(""/lib/metaxploit.so"")
+        if nestMeta isa Error then
+            return Error.New(""metaxploit.so not found on Nest either"", ""NO_META"")
+        end if
+        scpMeta = pivotShell.scp(""/lib/metaxploit.so"", ""/lib"", nodeShell)
+        if typeof(scpMeta) == ""string"" and scpMeta.len > 0 then
+            scpMeta = pivotShell.scp(""/lib/metaxploit.so"", ""/shiny"", nodeShell)
+            if typeof(scpMeta) == ""string"" and scpMeta.len > 0 then
+                return Error.New(""Could not upload metaxploit.so: "" + scpMeta, ""UPLOAD_FAILED"")
+            end if
+            self.metaPath = ""/shiny/metaxploit.so""
+        else
+            self.metaPath = ""/lib/metaxploit.so""
+        end if
+        self.uploadedMeta = true
+        ui.success(""  Uploaded metaxploit.so -> "" + self.metaPath)
+    else
+        self.metaPath = metaFile.path
+        self.uploadedMeta = false
+        ui.dim(""  metaxploit.so found at "" + self.metaPath)
+    end if
+
+    // ── Ensure crypto.so is available ────────────────────────────────────
+    cryptoFile = nodeComp.File(""/lib/crypto.so"")
+    if cryptoFile == null then
+        cryptoFile = nodeComp.File(""/usr/lib/crypto.so"")
+    end if
+
+    if cryptoFile == null then
+        ui.info(""  crypto.so not found on node - uploading from Nest..."")
+        nestCrypto = pivotHandler.getFile(""/lib/crypto.so"")
+        if nestCrypto isa Error then
+            ui.warning(""  crypto.so not found on Nest - some operations may be limited"")
+            self.cryptoPath = """"
+            self.uploadedCrypto = false
+        else
+            scpCrypto = pivotShell.scp(""/lib/crypto.so"", ""/lib"", nodeShell)
+            if typeof(scpCrypto) == ""string"" and scpCrypto.len > 0 then
+                scpCrypto = pivotShell.scp(""/lib/crypto.so"", ""/shiny"", nodeShell)
+                if typeof(scpCrypto) == ""string"" and scpCrypto.len > 0 then
+                    ui.warning(""  Could not upload crypto.so - some operations may be limited"")
+                    self.cryptoPath = """"
+                    self.uploadedCrypto = false
+                else
+                    self.cryptoPath = ""/shiny/crypto.so""
+                    self.uploadedCrypto = true
+                    ui.success(""  Uploaded crypto.so -> "" + self.cryptoPath)
+                end if
+            else
+                self.cryptoPath = ""/lib/crypto.so""
+                self.uploadedCrypto = true
+                ui.success(""  Uploaded crypto.so -> "" + self.cryptoPath)
+            end if
+        end if
+    else
+        self.cryptoPath = cryptoFile.path
+        self.uploadedCrypto = false
+        ui.dim(""  crypto.so found at "" + self.cryptoPath)
+    end if
+
+    // ── Load metaxploit from node ─────────────────────────────────────────
+    rawMeta = include_lib(self.metaPath)
+    if rawMeta == null then
+        return Error.New(""include_lib failed for "" + self.metaPath, ""LIB_LOAD_FAILED"")
+    end if
+    self.roostMeta = Metaxploit.New(rawMeta)
+    if self.roostMeta isa Error then
+        return Error.New(""Could not wrap node metaxploit: "" + self.roostMeta.message, ""LIB_WRAP_FAILED"")
+    end if
+
+    // ── Load crypto from node if available ───────────────────────────────
+    if self.cryptoPath.len > 0 then
+        rawCrypto = include_lib(self.cryptoPath)
+        if rawCrypto != null then
+            self.roostCrypto = Crypto.New(rawCrypto)
+        end if
+    end if
+
+    self.active    = true
+    self.nodeIp    = nodeIp
+    self.roostShell = nodeShell
+
+    ui.success(""Platform deployed - attacks will originate from "" + nodeIp)
+    return null
+end function
+
+// ── deactivate ───────────────────────────────────────────────────────────────
+
+PlatformManager.deactivate = function()
+    ui = self.mediator.getExtension(""corvidUi"")
+    if not self.active then
+        ui.warning(""Platform not active"")
+        return
+    end if
+    nodeIp = self.nodeIp
+    self.active         = false
+    self.nodeIp         = """"
+    self.roostShell     = null
+    self.roostMeta      = null
+    self.roostCrypto    = null
+    self.metaPath       = """"
+    self.cryptoPath     = """"
+    self.uploadedMeta   = false
+    self.uploadedCrypto = false
+    ui.success(""Platform sleeping - attacks returning to Nest context"")
+end function
+
+// ── wipe ─────────────────────────────────────────────────────────────────────
+// Remove only what platform uploaded. Never deletes native libs or touches
+// anything else on the node. Node stays healthy for future use.
+
+PlatformManager.wipe = function()
+    ui = self.mediator.getExtension(""corvidUi"")
+    if not self.active then
+        ui.warning(""Platform not active - nothing to wipe"")
+        return
+    end if
+
+    roostComp = self.roostShell.host_computer
+    wiped = []
+
+    if self.uploadedMeta and self.metaPath.len > 0 then
+        f = roostComp.File(self.metaPath)
+        if f != null then
+            f.delete()
+            wiped.push(self.metaPath)
+        end if
+    end if
+
+    if self.uploadedCrypto and self.cryptoPath.len > 0 then
+        f = roostComp.File(self.cryptoPath)
+        if f != null then
+            f.delete()
+            wiped.push(self.cryptoPath)
+        end if
+    end if
+
+    if wiped.len > 0 then
+        for w in wiped
+            ui.success(""  Removed: "" + w)
+        end for
+    else
+        ui.dim(""  Nothing to remove (no files were uploaded)"")
+    end if
+
+    // Corrupt logs on the platform node before deactivating
+    // Uses the move trick: create empty file, move onto system.log
+    ui.info(""  Wiping logs on platform node..."")
+    logFile = roostComp.File(""/var/system.log"")
+    if logFile == null then
+        ui.dim(""  Log file not found - skipping"")
+    else
+        roostComp.touch(""/var"", ""t"")
+        emptyFile = roostComp.File(""/var/t"")
+        if emptyFile != null then
+            moveResult = emptyFile.move(""/var"", ""system.log"")
+            if moveResult == 1 then
+                ui.success(""  Logs wiped"")
+            else
+                emptyFile.delete()
+                ui.dim(""  Log wipe failed - may need root access"")
+            end if
+        end if
+    end if
+
+    // Clean up node-attacker, node-router, and job/results files
+    cleanNames = [""node-attacker"", ""node-router"", ""corvid-job.json"", ""corvid-results.json"", ""corvid-router-job.json"", ""corvid-router-results.json""]
+    for cleanName in cleanNames
+        cf = roostComp.File(""/shiny/"" + cleanName)
+        if cf != null then
+            cf.delete()
+            ui.success(""  Removed: /shiny/"" + cleanName)
+        end if
+    end for
+
+    self.deactivate()
+end function
+
+// ── getters ──────────────────────────────────────────────────────────────────
+
+PlatformManager.getMeta = function()
+    if self.active and self.roostMeta != null then
+        return self.roostMeta
+    end if
+    return null
+end function
+
+PlatformManager.getCrypto = function()
+    if self.active and self.roostCrypto != null then
+        return self.roostCrypto
+    end if
+    return null
+end function
+
+PlatformManager.status = function()
+    if not self.active then
+        return ""inactive""
+    end if
+    return self.nodeIp
+end function
+
+PlatformManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+PlatformManager.New = function()
+    result = new PlatformManager
+    result.active         = false
+    result.nodeIp         = """"
+    result.roostShell     = null
+    result.roostMeta      = null
+    result.roostCrypto    = null
+    result.uploadedMeta   = false
+    result.uploadedCrypto = false
+    result.metaPath       = """"
+    result.cryptoPath     = """"
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/sniffer-db.txt","// ============================================================
+// CORVID | managers/sniffer/sniffer-db
+// Persistent store for sniffer captures.
+// Separate from credential DB - captures are staged here
+// until promoted to main creds via 'sniffer promote'.
+// ============================================================
+
+SnifferDb = {}
+SnifferDb.records  = []
+SnifferDb.mediator = null
+SnifferDb.nextId   = 1
+
+SnifferDb.parse = function(raw)
+    // Parse meta.sniffer(0) output into structured record
+    // Format:
+    //   Incoming data captured.
+    //   Source: <ip>
+    //   Destination: <ip>
+    //   Protocol: <port>
+    //   USER: <user>
+    //   PASSWORD: <pass>
+    result = {}
+    result.source_ip  = """"
+    result.dest_ip    = """"
+    result.protocol   = """"
+    result.username   = """"
+    result.password   = """"
+
+    lines = raw.split(char(10))
+    for line in lines
+        line = line.trim
+        if line.indexOf(""Source: "") == 0 then
+            result.source_ip = line[8:]
+        else if line.indexOf(""Destination: "") == 0 then
+            result.dest_ip = line[13:]
+        else if line.indexOf(""Protocol: "") == 0 then
+            result.protocol = line[10:]
+        else if line.indexOf(""USER: "") == 0 then
+            result.username = line[6:]
+        else if line.indexOf(""PASSWORD: "") == 0 then
+            result.password = line[10:]
+        end if
+    end for
+
+    return result
+end function
+
+SnifferDb.add = function(raw, capturedFrom)
+    parsed = self.parse(raw)
+    record = {}
+    record.id           = ""sn_"" + str(self.nextId)
+    record.source_ip    = parsed.source_ip
+    record.dest_ip      = parsed.dest_ip
+    record.protocol     = parsed.protocol
+    record.username     = parsed.username
+    record.password     = parsed.password
+    record.captured_from = capturedFrom
+    record.timestamp    = str(floor(time))
+    record.raw          = raw
+    self.records.push(record)
+    self.nextId = self.nextId + 1
+    return record
+end function
+
+SnifferDb.find = function(id)
+    for r in self.records
+        if r.id == id then
+            return r
+        end if
+    end for
+    return null
+end function
+
+SnifferDb.remove = function(id)
+    newRecords = []
+    for r in self.records
+        if r.id != id then
+            newRecords.push(r)
+        end if
+    end for
+    self.records = newRecords
+end function
+
+SnifferDb.load = function(data)
+    if data.hasIndex(""sniffer_captures"") then
+        self.records = data.sniffer_captures
+        if self.records.len > 0 then
+            lastId = self.records[self.records.len - 1].id
+            numStr = lastId[3:]
+            self.nextId = numStr.val + 1
+        end if
+    end if
+end function
+
+SnifferDb.save = function(data)
+    data.sniffer_captures = self.records
+end function
+
+SnifferDb.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+",1)
+m("/Corvid/asriN/managers/shinylibs-db.txt","// ============================================================
+// CORVID | managers/shinylibs-db.txt
+// ShinyLibsDb — persistent store for scored library binaries
+// Keys: ""<libname>/<version>"" e.g. ""kernel_router.so/1.2.3""
+// ============================================================
+
+ShinyLibsDb = {}
+
+// Remote-access lib names we prioritise in display
+ShinyLibsDb.REMOTE_LIBS = [""kernel_router.so"", ""kernel_module.so"", ""libssh.so"", ""libhttp.so"", ""libftp.so"", ""libsmtp.so""]
+
+// Constraint penalty values used in scoring
+ShinyLibsDb.PENALTY_ADMIN_ACTIVE   = 40
+ShinyLibsDb.PENALTY_ANY_USER       = 20
+ShinyLibsDb.PENALTY_USER_COUNT     = 10
+ShinyLibsDb.PENALTY_PORT_FORWARD   = 10
+ShinyLibsDb.PENALTY_FIREWALL_OFF   = 15
+
+// Result type base scores
+ShinyLibsDb.SCORE_ROOT_SHELL       = 100
+ShinyLibsDb.SCORE_USER_SHELL       = 60
+ShinyLibsDb.SCORE_COMPUTER         = 20
+ShinyLibsDb.SCORE_FILE             = 10
+ShinyLibsDb.SCORE_NUMBER           = 5
+
+// ── init ─────────────────────────────────────────────────────
+ShinyLibsDb.init = function()
+    self.records   = {}   // keyed by libname/version
+    self.staged    = []   // pending collection: {libName, version, filePath, exploits, score, isRemote}
+    self.dataPath  = ""/Corvid/Data/shinylibs""
+    self.dbPath    = ""/Corvid/Data/shinylibs.json""
+end function
+
+// ── scoreExploit ─────────────────────────────────────────────
+// Parse a single scan_address result string and return a scored exploit map
+ShinyLibsDb.scoreExploit = function(scanText)
+    exploit = {}
+    exploit.raw        = scanText
+    exploit.resultType = ""unknown""
+    exploit.score      = 0
+    exploit.conditions = []
+    exploit.isLocal    = false
+
+    lower = scanText.lower
+
+    // Determine result type
+    if lower.indexOf(""root"") != null and lower.indexOf(""shell"") != null then
+        exploit.resultType = ""root_shell""
+        exploit.score      = ShinyLibsDb.SCORE_ROOT_SHELL
+    else if lower.indexOf(""shell"") != null then
+        exploit.resultType = ""user_shell""
+        exploit.score      = ShinyLibsDb.SCORE_USER_SHELL
+    else if lower.indexOf(""computer"") != null then
+        exploit.resultType = ""computer""
+        exploit.score      = ShinyLibsDb.SCORE_COMPUTER
+    else if lower.indexOf(""file"") != null then
+        exploit.resultType = ""file""
+        exploit.score      = ShinyLibsDb.SCORE_FILE
+    else if lower.indexOf(""firewall"") != null or lower.indexOf(""number"") != null then
+        exploit.resultType = ""number""
+        exploit.score      = ShinyLibsDb.SCORE_NUMBER
+    end if
+
+    // Local-only flag
+    if lower.indexOf(""local"") != null then
+        exploit.isLocal = true
+    end if
+
+    // Parse constraints from ""* Checking ..."" lines
+    lines = scanText.split(""\\n"")
+    for line in lines
+        l = line.trim.lower
+        if l.indexOf(""* checking"") != 0 then
+            continue
+        end if
+        if l.indexOf(""admin"") != null or (l.indexOf(""active user"") != null and l.indexOf(""any"") == null) then
+            exploit.conditions.push(""admin_active"")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_ADMIN_ACTIVE
+        else if l.indexOf(""any user"") != null then
+            exploit.conditions.push(""any_user_active"")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_ANY_USER
+        else if l.indexOf(""registered users"") != null or l.indexOf(""user count"") != null then
+            exploit.conditions.push(""user_count"")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_USER_COUNT
+        else if l.indexOf(""port forward"") != null then
+            exploit.conditions.push(""port_forward"")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_PORT_FORWARD
+        else if l.indexOf(""firewall"") != null then
+            exploit.conditions.push(""firewall_off"")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_FIREWALL_OFF
+        end if
+    end for
+
+    if exploit.score < 0 then
+        exploit.score = 0
+    end if
+
+    return exploit
+end function
+
+// ── scoreLib ─────────────────────────────────────────────────
+// Given a list of exploit scan strings, return aggregate score and exploit list
+ShinyLibsDb.scoreLib = function(libName, version, exploitTexts)
+    result = {}
+    result.libName   = libName
+    result.version   = version
+    result.exploits  = []
+    result.topScore  = 0
+    result.totalScore = 0
+    result.hasRootNoCondition = false
+    result.isRemote  = ShinyLibsDb.REMOTE_LIBS.indexOf(libName) != null
+
+    for txt in exploitTexts
+        e = ShinyLibsDb.scoreExploit(txt)
+        result.exploits.push(e)
+        result.totalScore = result.totalScore + e.score
+        if e.score > result.topScore then
+            result.topScore = e.score
+        end if
+        if e.resultType == ""root_shell"" and e.conditions.len == 0 then
+            result.hasRootNoCondition = true
+        end if
+    end for
+
+    return result
+end function
+
+// ── stage ─────────────────────────────────────────────────────
+// Add a scored lib result to staged list if it's shiny vs existing records
+// Returns: ""offensive"" | ""defensive"" | ""both"" | null
+ShinyLibsDb.stage = function(libName, version, exploitTexts, srcPath)
+    scored = ShinyLibsDb.scoreLib(libName, version, exploitTexts)
+    scored.srcPath   = srcPath
+    scored.collected = false
+
+    // Find best offensive and defensive we already have for this lib name
+    bestOffScore = 0
+    bestDefScore = 999999
+    for key in self.records
+        rec = key.value
+        if rec.libName != libName then
+            continue
+        end if
+        if rec.topScore > bestOffScore then
+            bestOffScore = rec.topScore
+        end if
+        if rec.topScore < bestDefScore then
+            bestDefScore = rec.topScore
+        end if
+    end for
+
+    isOffensive = scored.topScore > bestOffScore
+    isDefensive = (bestDefScore == 999999 and scored.exploits.len == 0) or (scored.topScore < bestDefScore and scored.exploits.len == 0)
+
+    if not isOffensive and not isDefensive then
+        return null
+    end if
+
+    scored.shinyType = """"
+    if isOffensive and isDefensive then
+        scored.shinyType = ""both""
+    else if isOffensive then
+        scored.shinyType = ""offensive""
+    else
+        scored.shinyType = ""defensive""
+    end if
+
+    // If already staged, update srcPath (session may have changed) and return type
+    for s in self.staged
+        if s.libName == libName and s.version == version then
+            s.srcPath = srcPath
+            return s.shinyType
+        end if
+    end for
+
+    self.staged.push(scored)
+    return scored.shinyType
+end function
+
+// ── collect ──────────────────────────────────────────────────
+// Move a staged lib into the DB (after user confirms and binary is copied)
+ShinyLibsDb.collect = function(libName, version, localFilePath)
+    key = libName + ""/"" + version
+    scored = null
+    for s in self.staged
+        if s.libName == libName and s.version == version then
+            scored = s
+            break
+        end if
+    end for
+
+    if scored == null then
+        return Error.New(""Not in staged list"", ""NOT_STAGED"")
+    end if
+
+    scored.localPath = localFilePath
+    scored.collected = true
+    self.records[key] = scored
+
+    // Remove from staged
+    newStaged = []
+    for s in self.staged
+        if s.libName != libName or s.version != version then
+            newStaged.push(s)
+        end if
+    end for
+    self.staged = newStaged
+
+    return scored
+end function
+
+// ── getBestOffensive / getBestDefensive ───────────────────────
+ShinyLibsDb.getBestForLib = function(libName)
+    best = null
+    for key in self.records
+        rec = key.value
+        if rec.libName != libName then
+            continue
+        end if
+        if best == null or rec.topScore > best.topScore then
+            best = rec
+        end if
+    end for
+    return best
+end function
+
+ShinyLibsDb.getMostSecureForLib = function(libName)
+    best = null
+    for key in self.records
+        rec = key.value
+        if rec.libName != libName then
+            continue
+        end if
+        // Most secure = fewest exploits, lowest score
+        if best == null or rec.topScore < best.topScore then
+            best = rec
+        end if
+    end for
+    return best
+end function
+
+// ── allLibNames ───────────────────────────────────────────────
+ShinyLibsDb.allLibNames = function()
+    names = []
+    for key in self.records
+        rec = key.value
+        if names.indexOf(rec.libName) == null then
+            names.push(rec.libName)
+        end if
+    end for
+    return names
+end function
+
+// ── serialize / deserialize ───────────────────────────────────
+ShinyLibsDb.serialize = function()
+    return self.records
+end function
+
+ShinyLibsDb.deserialize = function(data)
+    self.records = data
+end function
+",1)
+m("/Corvid/asriN/managers/shinylibs-manager.txt","// ============================================================
+// CORVID | managers/shinylibs-manager.txt
+// ShinyLibsManager — scan, collect, display, put shiny libs
+// ============================================================
+
+ShinyLibsManager = {}
+
+ShinyLibsManager.init = function(mediator)
+    self.mediator = mediator
+    self.db       = ShinyLibsDb
+    // Note: db.init() is called by databaseManager before this runs.
+    // Do NOT call self.db.init() here - it would wipe loaded records.
+end function
+
+// ── scanSession ──────────────────────────────────────────────
+// Scan all libs on current session, stage any shiny ones.
+// Returns list of shiny results found.
+ShinyLibsManager.scanSession = function(sessionHandler, metaxploit)
+    ui = self.mediator.getExtension(""corvidUi"")
+    found = []
+
+    comp = sessionHandler.shell.shell.host_computer
+    libFolder = comp.File(""/lib"")
+    if libFolder == null or not libFolder.is_folder then
+        return found
+    end if
+
+    libFiles = libFolder.get_files
+    if libFiles == null then
+        return found
+    end if
+
+    for libFile in libFiles
+        if libFile.name.indexOf("".so"") == null then
+            continue
+        end if
+        shinyType = self.checkLib(libFile, metaxploit)
+        if shinyType != null then
+            found.push({""libName"": libFile.name, ""shinyType"": shinyType})
+        end if
+    end for
+
+    return found
+end function
+
+// ── checkLib ─────────────────────────────────────────────────
+// Load one lib, score it, stage if shiny. Returns shinyType or null.
+ShinyLibsManager.checkLib = function(libFile, metaxploit)
+    // Pass the raw file object directly to metaxploit.load() —
+    // accepts a file object from any machine, not just a local path string.
+    metalib = metaxploit.load(libFile)
+    if metalib == null or metalib isa Error then
+        return null
+    end if
+
+    version     = metalib.version
+    libName     = libFile.name
+    memAddrs    = metaxploit.scan(metalib)
+    if memAddrs == null then
+        memAddrs = []
+    end if
+
+    exploitTexts = []
+    for addr in memAddrs
+        txt = metaxploit.scanAddress(metalib, addr)
+        if txt != null then
+            exploitTexts.push(txt)
+        end if
+    end for
+
+    return self.db.stage(libName, version, exploitTexts, libFile.path)
+end function
+
+// ── showStagedNotification ────────────────────────────────────
+// Rainbow attention message shown during/after attack flow
+ShinyLibsManager.showStagedNotification = function()
+    if self.db.staged.len == 0 then
+        return
+    end if
+
+    ui = self.mediator.getExtension(""corvidUi"")
+
+    // Build rainbow lib list
+    colors = [""#FF0000"", ""#FF6600"", ""#FFD700"", ""#FFFF00"", ""#00FF00"", ""#00FFFF"", ""#0088FF"", ""#8800FF"", ""#FF00FF"", ""#C0C0C0"", ""#FFD700"", ""#FFFFFF""]
+
+    offCount = 0
+    defCount = 0
+    libList  = """"
+    colorIdx = 0
+    for s in self.db.staged
+        if s.shinyType == ""offensive"" or s.shinyType == ""both"" then
+            offCount = offCount + 1
+        end if
+        if s.shinyType == ""defensive"" or s.shinyType == ""both"" then
+            defCount = defCount + 1
+        end if
+        col = colors[colorIdx % colors.len]
+        colorIdx = colorIdx + 1
+        tag = """"
+        if s.shinyType == ""offensive"" then
+            tag = ""<color=#FFD700>[VULN]</color>""
+        else if s.shinyType == ""defensive"" then
+            tag = ""<color=#C0C0C0>[SECURE]</color>""
+        else
+            tag = ""<color=#00FFFF>[BOTH]</color>""
+        end if
+        libList = libList + ""  "" + tag + "" <color="" + col + "">"" + s.libName + "" v"" + s.version + ""</color>\\n""
+    end for
+
+    ui.print("""")
+    ui.print(""<color=#FFD700>✦ ✦ ✦ ✦ ✦ ✦  <color=#FFFFFF>SHINY LIBRARIES DETECTED</color>  ✦ ✦ ✦ ✦ ✦ ✦</color>"")
+    ui.print(libList.trim)
+    ui.print(""<color=#00FF00>"" + self.db.staged.len + "" shiny lib(s) staged</color> — "" + ""<color=#FFD700>offensive: "" + offCount + ""</color>  "" + ""<color=#C0C0C0>defensive: "" + defCount + ""</color>"")
+    ui.print(""<color=#00FFFF>Run <color=#FFFFFF>shinylibs get</color> to collect, or <color=#FFFFFF>shinylibs scan</color> for a full lib scan.</color>"")
+    ui.print(""<color=#FFD700>✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦ ✦</color>"")
+    ui.print("""")
+end function
+
+// ── collectStaged ─────────────────────────────────────────────
+// For each staged lib: show details, prompt y/n, SCP and store if yes.
+ShinyLibsManager.collectStaged = function(sessionHandler, pivotHandler)
+    ui = self.mediator.getExtension(""corvidUi"")
+
+    if self.db.staged.len == 0 then
+        ui.info(""No shiny libs staged. Run shinylibs scan first."")
+        return
+    end if
+
+    pivotShell = pivotHandler.shell.shell
+    pivotComp  = pivotShell.host_computer
+
+    collected = 0
+    skipped   = 0
+
+    for staged in self.db.staged
+        ui.separator()
+        // Show exploit summary
+        typeColor = ""#FFD700""
+        if staged.shinyType == ""defensive"" then
+            typeColor = ""#C0C0C0""
+        else if staged.shinyType == ""both"" then
+            typeColor = ""#00FFFF""
+        end if
+        ui.print(""<color="" + typeColor + "">★ "" + staged.libName + "" v"" + staged.version + ""  ["" + staged.shinyType.upper + ""]</color>"")
+        ui.print(""  Top score: "" + staged.topScore + ""  |  Exploits: "" + staged.exploits.len)
+
+        for e in staged.exploits
+            cond = """"
+            if e.conditions.len > 0 then
+                cond = ""  ("" + e.conditions.join("", "") + "")""
+            end if
+            ui.print(""  <color=#888888>• "" + e.resultType + ""  score:"" + e.score + cond + ""</color>"")
+        end for
+
+        answer = user_input(""Collect "" + staged.libName + "" v"" + staged.version + ""? (y/n) "", false)
+        if answer.lower != ""y"" then
+            skipped = skipped + 1
+            continue
+        end if
+
+        // Create dest path: /Corvid/Data/shinylibs/<libname_no_ext>/<version>/
+        libBaseName = staged.libName
+        if libBaseName.indexOf("".so"") != null then
+            libBaseName = libBaseName[:-3]
+        end if
+        destDir = self.db.dataPath + ""/"" + libBaseName + ""/"" + staged.version
+        self.ensureDir(pivotComp, destDir)
+
+        // SCP from current session to Nest
+        // If srcPath is empty (staged during attack), resolve from current session
+        remoteShell = sessionHandler.shell.shell
+        if staged.srcPath.len == 0 then
+            remoteComp = remoteShell.host_computer
+            libFile = remoteComp.File(""/lib/"" + staged.libName)
+            if libFile == null then
+                ui.warning(""Cannot find /lib/"" + staged.libName + "" on current session - run shinylibs scan first"")
+                skipped = skipped + 1
+                continue
+            end if
+            staged.srcPath = libFile.path
+        end if
+        scpResult = remoteShell.scp(staged.srcPath, destDir, pivotShell)
+        // If SCP failed, try other sessions on same IP
+        if typeof(scpResult) == ""string"" and scpResult.len > 0 then
+            sessionManager = self.mediator.getExtension(""sessionManager"")
+            for sess in sessionManager.sessions
+                if sess == sessionManager.pivotSession then
+                    continue
+                end if
+                if sess.handler.type() != ""shell"" then
+                    continue
+                end if
+                altShell = sess.handler.shell.shell
+                altResult = altShell.scp(staged.srcPath, destDir, pivotShell)
+                if not (typeof(altResult) == ""string"" and altResult.len > 0) then
+                    scpResult = altResult
+                    break
+                end if
+            end for
+        end if
+        if typeof(scpResult) == ""string"" and scpResult.len > 0 then
+            ui.warning(""SCP failed: "" + scpResult)
+            ui.dim(""  Tip: run 'shinylibs scan' first to resolve lib paths, then 'shinylibs get'"")
+            skipped = skipped + 1
+            continue
+        end if
+
+        localPath = destDir + ""/"" + staged.libName
+        result = self.db.collect(staged.libName, staged.version, localPath)
+        if result isa Error then
+            ui.warning(""DB collect failed: "" + result.message)
+        else
+            ui.success(""Collected "" + staged.libName + "" v"" + staged.version + "" -> "" + localPath)
+            collected = collected + 1
+        end if
+    end for
+
+    ui.separator()
+    ui.info(""Collected: "" + collected + ""  Skipped: "" + skipped)
+end function
+
+// ── scan ─────────────────────────────────────────────────────
+// Full lib scan of current session
+ShinyLibsManager.scan = function(sessionHandler)
+    ui      = self.mediator.getExtension(""corvidUi"")
+    libMgr  = self.mediator.getExtension(""libManager"")
+    meta    = libMgr.getMetaxploit()
+
+    if meta == null or meta isa Error then
+        return Error.New(""metaxploit not available"", ""NO_META"")
+    end if
+
+    ui.info(""Scanning /lib/ on current session..."")
+    ui.dim(""(File reads through existing session — no additional log entries created)"")
+    found = self.scanSession(sessionHandler, meta)
+
+    if found.len == 0 then
+        ui.info(""No new shiny libs found."")
+        return
+    end if
+
+    self.showStagedNotification()
+end function
+
+// ── resweep ──────────────────────────────────────────────────
+// Re-score all stored libs against current metaxploit
+ShinyLibsManager.resweep = function(pivotHandler)
+    ui     = self.mediator.getExtension(""corvidUi"")
+    libMgr = self.mediator.getExtension(""libManager"")
+    meta   = libMgr.getMetaxploit()
+
+    if meta == null or meta isa Error then
+        return Error.New(""metaxploit not available on pivot"", ""NO_META"")
+    end if
+
+    ui.info(""Resweeping all stored libs with current metaxploit..."")
+    updated = 0
+
+    for key in self.db.records
+        rec = key.value
+        localFile = pivotHandler.shell.shell.host_computer.File(rec.localPath)
+        if localFile == null then
+            ui.warning(""Missing file: "" + rec.localPath + "" — skipping"")
+            continue
+        end if
+
+        metalib = meta.load(rec.localPath)
+        if metalib == null or metalib isa Error then
+            ui.warning(""Could not load "" + rec.localPath + "" — skipping"")
+            continue
+        end if
+
+        memAddrs = meta.scan(metalib)
+        if memAddrs == null then
+            memAddrs = []
+        end if
+
+        exploitTexts = []
+        for addr in memAddrs
+            txt = meta.scanAddress(metalib, addr)
+            if txt != null then
+                exploitTexts.push(txt)
+            end if
+        end for
+
+        scored = self.db.scoreLib(rec.libName, rec.version, exploitTexts)
+        rec.exploits  = scored.exploits
+        rec.topScore  = scored.topScore
+        rec.totalScore = scored.totalScore
+        rec.hasRootNoCondition = scored.hasRootNoCondition
+        self.db.records[key] = rec
+        updated = updated + 1
+        ui.info(""Updated: "" + rec.libName + "" v"" + rec.version + ""  top score: "" + rec.topScore)
+    end for
+
+    ui.success(""Resweep complete. "" + updated + "" lib(s) updated."")
+end function
+
+// ── list ─────────────────────────────────────────────────────
+ShinyLibsManager.list = function()
+    ui = self.mediator.getExtension(""corvidUi"")
+
+    if self.db.records.len == 0 then
+        ui.info(""No shiny libs collected yet. Run shinylibs scan then shinylibs get."")
+        return
+    end if
+
+    // Separate into remote and local libs, get best of each type per lib name
+    remoteLibs = []
+    localLibs  = []
+
+    libNames = self.db.allLibNames()
+    for name in libNames
+        bestOff = self.db.getBestForLib(name)
+        bestDef = self.db.getMostSecureForLib(name)
+        isRemote = ShinyLibsDb.REMOTE_LIBS.indexOf(name) != null
+        entry = {""name"": name, ""bestOff"": bestOff, ""bestDef"": bestDef, ""isRemote"": isRemote}
+        if isRemote then
+            remoteLibs.push(entry)
+        else
+            localLibs.push(entry)
+        end if
+    end for
+
+    // Sort remote by top offensive score desc
+    // (simple bubble sort — small list)
+    if remoteLibs.len > 1 then
+        for i in range(0, remoteLibs.len - 2)
+            for j in range(0, remoteLibs.len - 2 - i)
+                if remoteLibs[j].bestOff.topScore < remoteLibs[j+1].bestOff.topScore then
+                    tmp = remoteLibs[j]
+                    remoteLibs[j] = remoteLibs[j+1]
+                    remoteLibs[j+1] = tmp
+                end if
+            end for
+        end for
+    end if
+
+    ui.separator()
+    ui.highlight(""SHINY LIBS — REMOTE ACCESS"")
+    ui.separator()
+    self.printLibEntries(remoteLibs, ui)
+
+    ui.separator()
+    ui.highlight(""SHINY LIBS — LOCAL"")
+    ui.separator()
+    self.printLibEntries(localLibs, ui)
+
+    if self.db.staged.len > 0 then
+        ui.print("""")
+        ui.print(""<color=#FFD700>"" + self.db.staged.len + "" lib(s) staged and awaiting collection — run shinylibs get</color>"")
+    end if
+end function
+
+ShinyLibsManager.printLibEntries = function(entries, ui)
+    if entries.len == 0 then
+        ui.dim(""  (none)"")
+        return
+    end if
+    for entry in entries
+        off = entry.bestOff
+        def = entry.bestDef
+        rootFlag = """"
+        if off.hasRootNoCondition then
+            rootFlag = "" <color=#FF0000>★ROOT</color>""
+        end if
+        ui.print(""<color=#FFD700>"" + entry.name + ""</color>"")
+        ui.print(""  <color=#FF6600>VULN</color>  v"" + off.version + ""  score:"" + off.topScore + rootFlag + ""  exploits:"" + off.exploits.len)
+        if def.version != off.version then
+            ui.print(""  <color=#C0C0C0>SECURE</color> v"" + def.version + ""  score:"" + def.topScore + ""  exploits:"" + def.exploits.len)
+        end if
+    end for
+end function
+
+// ── put ──────────────────────────────────────────────────────
+ShinyLibsManager.put = function(mode, sessionHandler, pivotHandler)
+    ui = self.mediator.getExtension(""corvidUi"")
+
+    if mode != ""harden"" and mode != ""vuln"" then
+        return Error.New(""mode must be harden or vuln"", ""BAD_MODE"")
+    end if
+
+    ui.separator()
+    if mode == ""harden"" then
+        ui.highlight(""SHINYLIBS PUT — HARDEN"")
+    else
+        ui.highlight(""SHINYLIBS PUT — VULN"")
+    end if
+    ui.warning(""SCP writes to the target machine — log entries will be created on the TARGET."")
+    ui.warning(""Run corruptlogs or leave wipe on this session when done."")
+    ui.separator()
+
+    sessionComp = sessionHandler.shell.shell.host_computer
+    pivotShell  = pivotHandler.shell.shell
+
+    // Get existing libs on target
+    libFolder = sessionComp.File(""/lib"")
+    if libFolder == null or not libFolder.is_folder then
+        return Error.New(""No /lib folder on target"", ""NO_LIB"")
+    end if
+
+    targetLibs = {}
+    libFiles = libFolder.get_files
+    if libFiles != null then
+        for f in libFiles
+            if f.name.indexOf("".so"") != null then
+                targetLibs[f.name] = f
+            end if
+        end for
+    end if
+
+    replaced = 0
+    skipped  = 0
+
+    for kv in targetLibs
+        libName = kv.key
+        // Find our best or most secure version
+        candidate = null
+        if mode == ""harden"" then
+            candidate = self.db.getMostSecureForLib(libName)
+        else
+            candidate = self.db.getBestForLib(libName)
+        end if
+
+        if candidate == null then
+            skipped = skipped + 1
+            continue
+        end if
+
+        // Compare target lib version against candidate
+        targetFile = kv.value
+        targetMeta = null
+        libMgr = self.mediator.getExtension(""libManager"")
+        meta   = libMgr.getMetaxploit()
+        targetScore = -1
+        targetVersion = """"
+        
+        if meta != null and not (meta isa Error) then
+            // Pass file object directly (not path string) so metaxploit can read it
+            targetMeta = meta.load(targetFile)
+            if targetMeta != null and not (targetMeta isa Error) then
+                targetVersion = targetMeta.version
+                
+                // Check if we have this version in our DB already
+                key = libName + ""/"" + targetVersion
+                if self.db.records.hasIndex(key) then
+                    targetScore = self.db.records[key].topScore
+                else
+                    // CRITICAL FIX: Real-time scoring of unknown target version
+                    ui.dim(""  Analyzing unknown target version: "" + libName + "" v"" + targetVersion)
+                    memAddrs = meta.scan(targetMeta)
+                    if memAddrs == null then
+                        memAddrs = []
+                    end if
+                    
+                    exploitTexts = []
+                    for addr in memAddrs
+                        txt = meta.scanAddress(targetMeta, addr)
+                        if txt != null then
+                            exploitTexts.push(txt)
+                        end if
+                    end for
+                    
+                    // Score the unknown target library
+                    scored = ShinyLibsDb.scoreLib(libName, targetVersion, exploitTexts)
+                    targetScore = scored.topScore
+                    ui.dim(""    Target score: "" + targetScore + "" (real-time analysis)"")
+                end if
+            end if
+        end if
+
+        // If candidate is same version as target, skip
+        if candidate.version == targetVersion then
+            ui.dim(""  Skipping "" + libName + "" — target already has candidate version "" + candidate.version)
+            skipped = skipped + 1
+            continue
+        end if
+
+        // Skip if target score already better for our purpose
+        if targetScore >= 0 then
+            if mode == ""harden"" and targetScore <= candidate.topScore then
+                ui.dim(""  Skipping "" + libName + "" — target already at or below candidate score"")
+                skipped = skipped + 1
+                continue
+            end if
+            if mode == ""vuln"" and targetScore >= candidate.topScore then
+                ui.dim(""  Skipping "" + libName + "" — target already at or above candidate score"")
+                skipped = skipped + 1
+                continue
+            end if
+        else
+            // Target score unknown (couldn't load/analyze target library)
+            // Conservative approach: require user confirmation for blind deployment
+            ui.warning(""  Cannot analyze target "" + libName + "" v"" + targetVersion)
+            deployAnswer = user_input(""  Deploy "" + candidate.libName + "" v"" + candidate.version + "" anyway? (y/n) "", false)
+            if deployAnswer.lower != ""y"" then
+                ui.dim(""  Skipped "" + libName + "" — user declined blind deployment"")
+                skipped = skipped + 1
+                continue
+            end if
+        end if
+
+        // SCP from Nest to target
+        scpResult = pivotShell.scp(candidate.localPath, ""/lib"", sessionHandler.shell.shell)
+        if typeof(scpResult) == ""string"" and scpResult.len > 0 then
+            ui.warning(""SCP failed for "" + libName + "": "" + scpResult)
+            skipped = skipped + 1
+            continue
+        end if
+
+        ui.success(""Replaced "" + libName + "" v"" + targetScore + "" -> v"" + candidate.version + "" [score: "" + candidate.topScore + ""]"")
+        replaced = replaced + 1
+    end for
+
+    ui.separator()
+    ui.info(""Replaced: "" + replaced + ""  Skipped: "" + skipped)
+    if replaced > 0 then
+        ui.warning(""Target logs updated — run corruptlogs or leave wipe to clean up."")
+    end if
+end function
+
+// ── ensureDir ─────────────────────────────────────────────────
+ShinyLibsManager.ensureDir = function(comp, fullPath)
+    parts = fullPath.split(""/"")
+    parts = parts[1:]  // drop leading empty from /
+    current = """"
+    for part in parts
+        current = current + ""/"" + part
+        f = comp.File(current)
+        if f == null then
+            // Calculate parent path by removing trailing /part
+            parentEnd = current.len - part.len - 1
+            if parentEnd <= 0 then
+                parent = ""/""
+            else
+                parent = current[:parentEnd]
+            end if
+            comp.create_folder(parent, part)
+        end if
+    end for
+end function
+
+ShinyLibsManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+",1)
+m("/Corvid/asriN/managers/macro-manager.txt","// ============================================================
+// CORVID | managers/macro/macro-manager
+// Stores and executes macro scripts.
+// Macros live in /Config/Macros/ on the pivot session.
+// The 'init' macro runs automatically on startup.
+// Trigger any macro mid-session with @macroname.
+// ============================================================
+
+MacroManager = {}
+MacroManager.mediator = null
+
+MacroManager.getMacroFolder = function()
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler        = sessionManager.pivotSession.handler
+
+    user   = handler.user
+    cfgPath = ""/home/guest/Config""
+    if user == ""root"" then
+        cfgPath = ""/root/Config""
+    else if user != ""guest"" then
+        cfgPath = ""/home/"" + user + ""/Config""
+    end if
+
+    folder = handler.getFile(cfgPath)
+    if folder isa Error then
+        return folder
+    end if
+
+    macroFolder = handler.getFile(cfgPath + ""/Macros"")
+    if macroFolder isa Error then
+        result = handler.createFolder(cfgPath + ""/Macros"")
+        if result isa Error then
+            return result
+        end if
+        macroFolder = handler.getFile(cfgPath + ""/Macros"")
+        if macroFolder isa Error then
+            return macroFolder
+        end if
+    end if
+
+    return macroFolder
+end function
+
+MacroManager.getMacro = function(name)
+    folder = self.getMacroFolder()
+    if folder isa Error then
+        return folder
+    end if
+    macro = folder.child(name)
+    if macro isa Error then
+        return Error.New(""Macro not found: "" + name, ""NOT_FOUND"")
+    end if
+    content = macro.content()
+    if content isa Error then
+        return content
+    end if
+    return content
+end function
+
+MacroManager.runMacro = function(name)
+    commandManager = self.mediator.getExtension(""commandManager"")
+    content = self.getMacro(name)
+    if content isa Error then
+        return content
+    end if
+    lines = content.split(char(10))
+    for line in lines
+        trimmed = line.trim
+        if trimmed.len == 0 then
+            continue
+        end if
+        if startsWith(trimmed, ""//"") then
+            continue
+        end if
+        commandManager.execute(trimmed)
+        commandManager.run()
+    end for
+end function
+
+MacroManager.init = function()
+    // Run init macro if it exists  -  silently skip if not
+    macro = self.getMacro(""init"")
+    if macro isa Error then
+        return
+    end if
+    self.runMacro(""init"")
+end function
+
+MacroManager.listMacros = function()
+    folder = self.getMacroFolder()
+    if folder isa Error then
+        return []
+    end if
+    kids = folder.children()
+    if kids isa Error then
+        return []
+    end if
+    names = []
+    for kid in kids
+        names.push(kid.name())
+    end for
+    return names
+end function
+
+MacroManager.saveMacro = function(name, content)
+    folder = self.getMacroFolder()
+    if folder isa Error then
+        return folder
+    end if
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler        = sessionManager.pivotSession.handler
+
+    existing = folder.child(name)
+    if existing isa Error then
+        result = handler.createFile(folder.path() + ""/"" + name)
+        if result isa Error then
+            return result
+        end if
+    end if
+
+    file = handler.getFile(folder.path() + ""/"" + name)
+    if file isa Error then
+        return file
+    end if
+    return file.setContent(content)
+end function
+
+MacroManager.deleteMacro = function(name)
+    folder = self.getMacroFolder()
+    if folder isa Error then
+        return folder
+    end if
+    macro = folder.child(name)
+    if macro isa Error then
+        return Error.New(""Macro not found: "" + name, ""NOT_FOUND"")
+    end if
+    return macro.delete()
+end function
+
+MacroManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+MacroManager.New = function()
+    result = new MacroManager
+    return result
+end function
+",1)

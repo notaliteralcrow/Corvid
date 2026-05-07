@@ -1,0 +1,92 @@
+// ============================================================
+// CORVID 2.0 | libs/functional
+// Functional programming utilities.
+// map, find, some, flat, indexOf.
+// ============================================================
+
+isIterable = function(item)
+    if typeof(item) == "map" then
+        return true
+    end if
+    if typeof(item) == "list" then
+        return true
+    end if
+    return false
+end function
+
+map = function(list, callback)
+    if typeof(list) == "map" then
+        newList = {}
+    end if
+    if typeof(list) == "list" then
+        newList = []
+    end if
+    if not isIterable(list) then
+        return Error.New("map requires a list or map", "TYPE_ERROR")
+    end if
+    if typeof(list) == "map" then
+        for item in list
+            k = item.key
+            newList[k] = callback(item)
+        end for
+    end if
+    if typeof(list) == "list" then
+        for v in list
+            newList.push(callback(v))
+        end for
+    end if
+    return newList
+end function
+
+find = function(list, callback)
+    if not isIterable(list) then
+        return Error.New("find requires a list or map", "TYPE_ERROR")
+    end if
+    for v in list
+        if callback(v) then
+            return v
+        end if
+    end for
+    return null
+end function
+
+some = function(list, callback)
+    if not isIterable(list) then
+        return Error.New("some requires a list or map", "TYPE_ERROR")
+    end if
+    for v in list
+        if callback(v) then
+            return true
+        end if
+    end for
+    return false
+end function
+
+flat = function(list)
+    if typeof(list) != "list" then
+        return Error.New("flat requires a list", "TYPE_ERROR")
+    end if
+    result = []
+    for item in list
+        if typeof(item) == "list" then
+            for nested in item
+                result.push(nested)
+            end for
+        else
+            result.push(item)
+        end if
+    end for
+    return result
+end function
+
+indexOf = function(list, item)
+    if typeof(list) != "list" then
+        return Error.New("indexOf requires a list", "TYPE_ERROR")
+    end if
+    for i in range(0, list.len - 1)
+        if list[i] == item then
+            return i
+        end if
+    end for
+    return null
+end function

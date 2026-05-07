@@ -1,0 +1,34 @@
+// ============================================================
+// CORVID 2.0 | utils/genRandomPass
+// Centralised random password generator.
+// Used by bounces harden, verify reattack, and any other
+// place that needs to generate a fresh credential.
+//
+// Avoids the ad-hoc per-call-site seed patterns scattered
+// through the codebase. Salt parameter lets callers add
+// per-target entropy (e.g. an IP) without colliding when
+// adjacent calls land in the same time tick.
+// ============================================================
+
+__genPassCounter = 0
+
+genRandomPass = function(length, salt)
+    if length == null or length < 1 then
+        length = 12
+    end if
+    if salt == null then
+        salt = ""
+    end if
+    chars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    // Combine time, salt length, and a per-call counter so successive
+    // calls within the same time tick produce different output.
+    __genPassCounter = __genPassCounter + 1
+    seed = floor(time * 1000) + salt.len * 17 + __genPassCounter * 31
+    out = ""
+    for i in range(0, length - 1)
+        idx = (seed + i * 7 + salt.len * 3) % chars.len
+        out = out + chars[idx]
+        seed = (seed * 13 + 7) % 99999
+    end for
+    return out
+end function

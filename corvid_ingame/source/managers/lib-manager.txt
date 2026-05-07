@@ -1,0 +1,158 @@
+// ============================================================
+// CORVID 2.0 | managers/lib/lib-manager
+// Tracks all loaded metaxploit and crypto libraries.
+// Maintains current (active) and pivot (Nest) refs for each.
+// ============================================================
+
+LIB_TYPES = {}
+LIB_TYPES.METAXPLOIT = "metaxploit"
+LIB_TYPES.CRYPTO     = "crypto"
+
+// ---- Lib record ----
+
+Lib = {}
+Lib.lib     = null
+Lib.type    = "unknown"
+Lib.data    = {}
+
+Lib.New = function(rawLib, data)
+    result      = new Lib
+    result.data = {}
+    result.data.ip      = {"public": "unknown", "local": "unknown"}
+    result.data.version = "unknown"
+    result.data.path    = ""
+
+    if not data.hasIndex("ip") then
+        return Error.New("Lib.New requires ip in data", "MISSING_PARAM")
+    end if
+    result.data.ip = data.ip
+    if data.hasIndex("path")    then
+        result.data.path    = data.path
+    end if
+    if data.hasIndex("version") then
+        result.data.version = data.version
+    end if
+
+    if typeof(rawLib) == "MetaxploitLib" then
+        wrapped = Metaxploit.New(rawLib)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        result.lib  = wrapped
+        result.type = LIB_TYPES.METAXPLOIT
+    else if typeof(rawLib) == "cryptoLib" then
+        wrapped = Crypto.New(rawLib)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        result.lib  = wrapped
+        result.type = LIB_TYPES.CRYPTO
+    else
+        return Error.New("Unknown library type: " + typeof(rawLib), "TYPE_ERROR")
+    end if
+
+    return result
+end function
+
+// ---- LibManager ----
+
+LibManager = {}
+LibManager.mediator     = null
+LibManager.libs         = []
+LibManager.currentLibs  = {}
+LibManager.pivotLibs    = {}
+
+LibManager.addLib = function(rawLib, data)
+    lib = Lib.New(rawLib, data)
+    if lib isa Error then
+        return lib
+    end if
+
+    // If metaxploit, get version from the library itself
+    if lib.type == LIB_TYPES.METAXPLOIT and data.hasIndex("path") then
+        netSession = lib.lib.metaxploit.net_use
+        // Version extracted differently  -  store path for later use
+        lib.data.path = data.path
+    end if
+
+    self.libs.push(lib)
+
+    // Set as current and pivot if first of this type
+    if not self.currentLibs.hasIndex(lib.type) or self.currentLibs[lib.type] == null then
+        self.currentLibs[lib.type] = lib
+    end if
+    if not self.pivotLibs.hasIndex(lib.type) or self.pivotLibs[lib.type] == null then
+        self.pivotLibs[lib.type] = lib
+    end if
+
+    return lib
+end function
+
+LibManager.getCurrentLib = function(libType)
+    if not self.currentLibs.hasIndex(libType) then
+        return null
+    end if
+    return self.currentLibs[libType]
+end function
+
+LibManager.setCurrentLib = function(lib)
+    self.currentLibs[lib.type] = lib
+end function
+
+LibManager.getPivotLib = function(libType)
+    if not self.pivotLibs.hasIndex(libType) then
+        return null
+    end if
+    return self.pivotLibs[libType]
+end function
+
+LibManager.setPivotLib = function(libType, lib)
+    self.pivotLibs[libType] = lib
+end function
+
+LibManager.getLibById = function(index)
+    if not self.libs.hasIndex(index) then
+        return Error.New("No lib at index: " + index, "NOT_FOUND")
+    end if
+    return self.libs[index]
+end function
+
+LibManager.allLibs = function()
+    return self.libs
+end function
+
+LibManager.getMetaxploit = function()
+    lib = self.getCurrentLib(LIB_TYPES.METAXPLOIT)
+    if lib == null then
+        return Error.New("No metaxploit library loaded", "NO_LIB")
+    end if
+    return lib.lib
+end function
+
+LibManager.getCrypto = function()
+    lib = self.getCurrentLib(LIB_TYPES.CRYPTO)
+    if lib == null then
+        return Error.New("No crypto library loaded", "NO_LIB")
+    end if
+    return lib.lib
+end function
+
+LibManager.getPivotMetaxploit = function()
+    lib = self.getPivotLib(LIB_TYPES.METAXPLOIT)
+    if lib == null then
+        return Error.New("No pivot metaxploit library loaded", "NO_LIB")
+    end if
+    return lib.lib
+end function
+
+LibManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+LibManager.New = function()
+    result = new LibManager
+    result.libs        = []
+    result.currentLibs = {}
+    result.pivotLibs   = {}
+    return result
+end function

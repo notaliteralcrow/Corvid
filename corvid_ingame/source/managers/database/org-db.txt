@@ -1,0 +1,128 @@
+// ============================================================
+// CORVID 2.0 | managers/database/org-db
+// Organisation record schema and operations.
+// An org is any company or entity whose infrastructure
+// has been touched or identified.
+//
+// Schema:
+//   id      string    -  auto-generated e.g. "o_001"
+//   name    string    -  company name
+//   domain  string    -  primary domain e.g. "acme.net"
+//   ips     list      -  known public IPs
+//   notes   string    -  freeform notes
+// ============================================================
+
+OrgDb = {}
+OrgDb.db = null
+
+OrgDb.findByDomain = function(domain)
+    matchDomain = function(record)
+        return record.hasIndex("domain") and record.domain == domain
+    end function
+    return self.db.query(@matchDomain)
+end function
+
+OrgDb.findByName = function(name)
+    term = lower(name)
+    matchName = function(record)
+        return record.hasIndex("name") and record.lower(name).indexOf(term) != null
+    end function
+    return self.db.query(@matchName)
+end function
+
+OrgDb.findByIp = function(ip)
+    matchIp = function(record)
+        return record.hasIndex("ips") and record.ips.indexOf(ip) != null
+    end function
+    return self.db.query(@matchIp)
+end function
+
+OrgDb.search = function(term)
+    term = lower(term)
+    matchAny = function(record)
+        if record.hasIndex("name")   and record.lower(name).indexOf(term)   != null then
+            return true
+        end if
+        if record.hasIndex("domain") and record.lower(domain).indexOf(term) != null then
+            return true
+        end if
+        if record.hasIndex("notes")  and record.lower(notes).indexOf(term)  != null then
+            return true
+        end if
+        return false
+    end function
+    return self.db.query(@matchAny)
+end function
+
+OrgDb.upsert = function(data)
+    // Upsert by domain  -  domain is the natural key for an org
+    if not data.hasIndex("domain") or data.domain.len == 0 then
+        return Error.New("Organisation record requires a domain", "VALIDATION_ERROR")
+    end if
+    existing = self.findByDomain(data.domain)
+    if existing.len > 0 then
+        record = existing[0]
+        id     = record.id
+        if data.hasIndex("ips") then
+            for ip in data.ips
+                if record.ips.indexOf(ip) == null then
+                    record.ips.push(ip)
+                end if
+            end for
+        end if
+        if data.hasIndex("name")  and data.name.len  > 0 then
+            record.name  = data.name
+        end if
+        if data.hasIndex("notes") and data.notes.len > 0 then
+            record.notes = data.notes
+        end if
+        self.db.set(id, record)
+        return id
+    else
+        id = self.db.nextId("o")
+        record = {}
+        record.id     = id
+        record.name   = ""
+        record.domain = data.domain
+        record.ips    = []
+        record.notes  = ""
+        if data.hasIndex("name")  then
+            record.name  = data.name
+        end if
+        if data.hasIndex("ips")   then
+            record.ips   = data.ips
+        end if
+        if data.hasIndex("notes") then
+            record.notes = data.notes
+        end if
+        self.db.set(id, record)
+        return id
+    end if
+end function
+
+OrgDb.get = function(id)
+    return self.db.get(id)
+end function
+
+OrgDb.all = function()
+    return self.db.all()
+end function
+
+OrgDb.addNote = function(id, note)
+    record = self.db.get(id)
+    if record isa Error then
+        return record
+    end if
+    if record.notes.len > 0 then
+        record.notes = record.notes + char(10) + note
+    else
+        record.notes = note
+    end if
+    self.db.set(id, record)
+end function
+
+OrgDb.New = function(db)
+    result    = new OrgDb
+    result.db = db
+    return result
+end function

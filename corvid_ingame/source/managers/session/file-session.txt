@@ -1,0 +1,206 @@
+// ============================================================
+// CORVID 2.0 | managers/session/file-session
+// Base session type. Provides virtual filesystem navigation
+// relative to a root and current directory. All higher
+// session types (computer, shell) extend this.
+// ============================================================
+
+FileSession = {}
+FileSession.root    = null
+FileSession.current = null
+FileSession.user    = "unknown"
+
+FileSession.getFile = function(path)
+    if path == null or path.len == 0 then
+        return self.current
+    end if
+
+    startingPoint = self.current
+    parts         = path.split("/")
+
+    if startsWith(path, "/") then
+        startingPoint = self.root
+        parts = parts[1:]
+    end if
+
+    for part in parts
+        if part == ".." then
+            parent = startingPoint.parent()
+            if parent isa Error then
+                return Error.New("Cannot go above root", "AT_ROOT")
+            end if
+            startingPoint = parent
+        else if part == "." or part.len == 0 then
+            continue
+        else
+            child = startingPoint.child(part)
+            if child isa Error then
+                return Error.New("Not found: " + path, "NOT_FOUND")
+            end if
+            startingPoint = child
+        end if
+    end for
+
+    return startingPoint
+end function
+
+FileSession.goTo = function(path)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    if target.type() == FILE_TYPES.FILE then
+        return Error.New("Cannot cd into a file", "TYPE_ERROR")
+    end if
+    self.current = target
+end function
+
+FileSession.path = function()
+    return self.current.path()
+end function
+
+FileSession.copy = function(srcPath, destPath)
+    src = self.getFile(srcPath)
+    if src isa Error then
+        return src
+    end if
+    dest     = self.getFile(destPath)
+    destName = src.name()
+    if dest isa Error then
+        destName = destPath.split("/").pop()
+        parentPath = parent_path(destPath)
+        dest = self.getFile(parentPath)
+        if dest isa Error then
+            return dest
+        end if
+    end if
+    return src.copy(dest.path(), destName)
+end function
+
+FileSession.move = function(srcPath, destPath)
+    src = self.getFile(srcPath)
+    if src isa Error then
+        return src
+    end if
+    dest     = self.getFile(destPath)
+    destName = src.name()
+    if dest isa Error or dest.type() == FILE_TYPES.FILE then
+        destName = destPath.split("/").pop()
+        parentPath = parent_path(destPath)
+        dest = self.getFile(parentPath)
+        if dest isa Error then
+            return dest
+        end if
+    end if
+    return src.move(dest.path(), destName)
+end function
+
+FileSession.delete = function(path)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    // If deleting current dir, move up first
+    if startsWith(self.current.path(), target.path()) then
+        self.current = target.parent()
+    end if
+    return target.delete()
+end function
+
+FileSession.setPermissions = function(path, perms, recursive)
+    if recursive == null then
+        recursive = false
+    end if
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.setPermissions(perms, recursive)
+end function
+
+FileSession.setOwner = function(path, owner, recursive)
+    if recursive == null then
+        recursive = false
+    end if
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.setOwner(owner, recursive)
+end function
+
+FileSession.setGroup = function(path, group, recursive)
+    if recursive == null then
+        recursive = false
+    end if
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.setGroup(group, recursive)
+end function
+
+FileSession.content = function(path)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.content()
+end function
+
+FileSession.setContent = function(path, content)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.setContent(content)
+end function
+
+FileSession.appendContent = function(path, content)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.appendContent(content)
+end function
+
+FileSession.rename = function(path, newName)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.rename(newName)
+end function
+
+FileSession.name = function()
+    // File sessions have no hostname - return path as identifier
+    if self.current != null then
+        return self.current.path()
+    end if
+    return "file-session"
+end function
+
+FileSession.privilege = function()
+    if self.user == "root"  then
+        return "root"
+    end if
+    if self.user == "guest" then
+        return "guest"
+    end if
+    if self.user == "unknown" then
+        return "unknown"
+    end if
+    return "user"
+end function
+
+FileSession.type = function()
+    return "file"
+end function
+
+FileSession.New = function(file)
+    result = new FileSession
+    result.root    = climbFileToRoot(file)
+    result.current = file
+    result.user    = getUserFromHandler(result)
+    return result
+end function

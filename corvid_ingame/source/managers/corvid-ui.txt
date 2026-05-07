@@ -1,0 +1,957 @@
+// ============================================================
+// CORVID 2.0 | managers/ui/corvid-ui
+// All display and formatting logic.
+// Every print statement in the entire codebase goes through
+// here. Themed output, table rendering, banner, prompt.
+// ============================================================
+
+CorvidUi = {}
+CorvidUi.singleton = null
+CorvidUi.mediator  = null
+
+// ---- Raw themed print helpers ----
+
+CorvidUi.print = function(str)
+    if str == null then
+        str = ""
+    end if
+    print(str)
+end function
+
+CorvidUi.success = function(str)
+    theme = self.mediator.getExtension("themeManager")
+    print(theme.success("[+] " + str))
+end function
+
+CorvidUi.warning = function(str)
+    theme = self.mediator.getExtension("themeManager")
+    print(theme.warning("[!] " + str))
+end function
+
+CorvidUi.error = function(str)
+    theme = self.mediator.getExtension("themeManager")
+    print(theme.error("[!] " + str))
+end function
+
+CorvidUi.info = function(str)
+    theme = self.mediator.getExtension("themeManager")
+    print(theme.info("[*] " + str))
+end function
+
+CorvidUi.highlight = function(str)
+    theme = self.mediator.getExtension("themeManager")
+    print(theme.highlight(str))
+end function
+
+CorvidUi.dim = function(str)
+    theme = self.mediator.getExtension("themeManager")
+    print(theme.secondary(str))
+end function
+
+CorvidUi.separator = function()
+    theme = self.mediator.getExtension("themeManager")
+    print(theme.secondary("--------------------------------------------"))
+end function
+
+// ---- Banner ----
+
+CorvidUi.showBanner = function()
+    theme = self.mediator.getExtension("themeManager")
+    banner = char(10) + theme.secondary("================================") + char(10) 
+    banner = banner + theme.highlight("           (oVo)              ") + char(10) 
+    banner = banner + theme.highlight("          // ^ " + char(92) + char(92) + "             ") + char(10) 
+    banner = banner + theme.highlight("       C O R V I D            ") + char(10) 
+    banner = banner + theme.highlight(" Thought and memory, with wings") + char(10) 
+    banner = banner + theme.secondary("================================")
+    print(banner)
+    print()
+end function
+
+// ---- Prompt ----
+
+CorvidUi.prompt = function(session)
+    theme           = self.mediator.getExtension("themeManager")
+    platformManager = self.mediator.getExtension("platformManager")
+    handler = session.handler
+    ip      = session.data.ip
+    name    = ""
+
+    if handler.type() == "shell" or handler.type() == "computer" then
+        name = handler.name()
+    end if
+
+    user    = handler.user
+    pubIp   = ip.public
+    lanIp   = ip.local
+    path    = handler.path()
+    hType   = handler.type()
+    priv    = handler.privilege()
+
+    promptStr = theme.secondary("(") + theme.highlight(user) + theme.secondary("@") + theme.highlight(name) + theme.secondary(")") + theme.secondary("[") + theme.info(pubIp) + theme.secondary("|") + theme.info(lanIp) + theme.secondary("]") + theme.secondary("[") + theme.warning(path) + theme.secondary("]") + theme.secondary("[") + theme.success(priv) + theme.secondary("]")
+
+    // Show platform mode indicator when active
+    if platformManager != null and platformManager.active then
+        promptStr = promptStr + theme.secondary("[") + theme.warning("via ") + theme.highlight(platformManager.nodeIp) + theme.secondary("]")
+    end if
+
+    promptStr = promptStr + theme.secondary(" ") + theme.highlight("$ ")
+
+    return promptStr
+end function
+
+// ---- Table rendering ----
+
+CorvidUi.table = function(keys, rows)
+    theme = self.mediator.getExtension("themeManager")
+
+    // Calculate column widths
+    widths = {}
+    for key in keys
+        widths[key] = key.len
+    end for
+    for row in rows
+        for key in keys
+            if row.hasIndex(key) then
+                cellLen = (row[key].text + "").len
+                if cellLen > widths[key] then
+                    widths[key] = cellLen
+                end if
+            end if
+        end for
+    end for
+
+    // Header
+    headerStr = ""
+    for key in keys
+        headerStr = headerStr + theme.highlight(padRight(upper(key), widths[key] + 2))
+    end for
+    print(headerStr)
+
+    // Separator
+    sepStr = ""
+    for key in keys
+        dashes = ""
+        for i in range(0, key.len - 1)
+            dashes = dashes + "-"
+        end for
+        sepStr = sepStr + theme.secondary(padRight(dashes, widths[key] + 2))
+    end for
+    print(sepStr)
+
+    // Rows
+    for row in rows
+        rowStr = ""
+        for key in keys
+            cell = {"text": "", "color": null}
+            if row.hasIndex(key) then
+                cell = row[key]
+            end if
+            padded = padRight(cell.text + "", widths[key] + 2)
+            if cell.color != null then
+                rowStr = rowStr + "<color=" + cell.color + ">" + padded + "</color>"
+            else
+                rowStr = rowStr + theme.text(padded)
+            end if
+        end for
+        print(rowStr)
+    end for
+    print()
+end function
+
+// ---- Session list display ----
+
+CorvidUi.sessions = function(sessions)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["id", "type", "user", "public_ip", "local_ip", "priv", "label"]
+    rows  = []
+    i     = 0
+    for session in sessions
+        handler = session.handler
+        ip      = session.data.ip
+        row     = {}
+        row.id = {}
+        row.id.text = str(i)
+        row.id.color = theme.colors.warning
+        row.type = {}
+        row.type.text = handler.type()
+        row.type.color = theme.colors.info
+        row.user = {}
+        row.user.text = handler.user
+        row.user.color = theme.colors.success
+        row.public_ip = {}
+        row.public_ip.text = ip.public
+        row.public_ip.color = theme.colors.info
+        row.local_ip = {}
+        row.local_ip.text = ip.local
+        row.local_ip.color = theme.colors.secondary
+        row.priv = {}
+        row.priv.text = handler.privilege()
+        row.priv.color = theme.colors.highlight
+        row.label = {}
+        row.label.text = session.label
+        row.label.color = theme.colors.secondary
+        rows.push(row)
+        i = i + 1
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Library list display ----
+
+CorvidUi.libs = function(libs, currentLibs, pivotLibs)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["id", "type", "version", "public_ip", "local_ip", "current", "pivot"]
+    rows  = []
+    i     = 0
+    for lib in libs
+        row = {}
+        isCurrent = currentLibs.hasIndex(lib.type) and currentLibs[lib.type] == lib
+        isPivot   = pivotLibs.hasIndex(lib.type)   and pivotLibs[lib.type]   == lib
+        row.id = {}
+        row.id.text = str(i)
+        row.id.color = theme.colors.warning
+        row.type = {}
+        row.type.text = lib.type + ""
+        row.type.color = theme.colors.info
+        row.version = {}
+        row.version.text = lib.data.version
+        row.version.color = theme.colors.secondary
+        row.public_ip = {}
+        row.public_ip.text = lib.data.ip.public
+        row.public_ip.color = theme.colors.info
+        row.local_ip = {}
+        row.local_ip.text = lib.data.ip.local
+        row.local_ip.color = theme.colors.secondary
+        row.current = {}
+        row.current.text = ""
+        row.current.color = theme.colors.secondary
+        row.pivot = {}
+        row.pivot.text = ""
+        row.pivot.color = theme.colors.secondary
+        if isCurrent then
+            row.current.text = "  *"
+            row.current.color = theme.colors.success
+        end if
+        if isPivot then
+            row.pivot.text = "  *"
+            row.pivot.color = theme.colors.highlight
+        end if
+        rows.push(row)
+        i = i + 1
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Process list display ----
+
+CorvidUi.processes = function(procs)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["user", "pid", "cpu", "mem", "command"]
+    rows  = []
+    for proc in procs
+        row = {}
+        userVal = ""
+        if proc.hasIndex("USER") then
+            userVal = proc.USER
+        end if
+        pidVal = ""
+        if proc.hasIndex("PID") then
+            pidVal = proc.PID
+        end if
+        cpuVal = ""
+        if proc.hasIndex("CPU") then
+            cpuVal = proc.CPU
+        end if
+        memVal = ""
+        if proc.hasIndex("MEM") then
+            memVal = proc.MEM
+        end if
+        cmdVal = ""
+        if proc.hasIndex("COMMAND") then
+            cmdVal = proc.COMMAND
+        end if
+        row.user = {}
+        row.user.text = userVal
+        row.user.color = theme.colors.success
+        row.pid = {}
+        row.pid.text = pidVal
+        row.pid.color = theme.colors.warning
+        row.cpu = {}
+        row.cpu.text = cpuVal
+        row.cpu.color = theme.colors.info
+        row.mem = {}
+        row.mem.text = memVal
+        row.mem.color = theme.colors.info
+        row.command = {}
+        row.command.text = cmdVal
+        row.command.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- File system listing ----
+
+CorvidUi.ls = function(children)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["permissions", "owner", "name", "size"]
+    rows  = []
+    for child in children
+        row = {}
+        nameColor = theme.colors.info
+        if child.type() == FILE_TYPES.FILE then
+            nameColor = theme.colors.secondary
+        end if
+        row.permissions = {}
+        row.permissions.text = child.permissions()
+        row.permissions.color = theme.colors.warning
+        row.owner = {}
+        row.owner.text = child.owner()
+        row.owner.color = theme.colors.success
+        row.name = {}
+        row.name.text = child.name()
+        row.name.color = nameColor
+        row.size = {}
+        row.size.text = str(child.size())
+        row.size.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- File system tree ----
+
+CorvidUi.fileSystemTree = function(file, depth)
+    theme = self.mediator.getExtension("themeManager")
+    if depth == null then
+        depth = 0
+    end if
+
+    indent = ""
+    for i in range(0, depth - 1)
+        indent = indent + "  "
+    end for
+    if depth > 0 then
+        indent = indent + "-"
+    end if
+
+    nameColor = theme.colors.info
+    if file.type() == FILE_TYPES.FILE then
+        nameColor = theme.colors.secondary
+    end if
+
+    line = indent + " " + theme.warning(file.permissions()) + " " + theme.success(file.owner()) + " " + "<color=" + nameColor + ">" + file.name() + "</color>" + " " + theme.secondary(str(file.size()))
+    print(line)
+
+    if file.type() == FILE_TYPES.FOLDER then
+        kids = file.children()
+        if not (kids isa Error) then
+            for kid in kids
+                self.fileSystemTree(kid, depth + 1)
+            end for
+        end if
+    end if
+end function
+
+// ---- Database record displays ----
+
+CorvidUi.persons = function(records)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["id", "name", "email", "org_id", "source"]
+    rows  = []
+    for r in records
+        row = {}
+        row.id = {}
+        row.id.text = r.id
+        row.id.color = theme.colors.warning
+        row.name = {}
+        row.name.text = r.name + ""
+        row.name.color = theme.colors.success
+        row.email = {}
+        row.email.text = r.email
+        row.email.color = theme.colors.info
+        row.org_id = {}
+        row.org_id.text = r.org_id
+        row.org_id.color = theme.colors.secondary
+        row.source = {}
+        row.source.text = r.source
+        row.source.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+CorvidUi.orgs = function(records)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["id", "name", "domain", "ips"]
+    rows  = []
+    for r in records
+        row = {}
+        row.id = {}
+        row.id.text = r.id
+        row.id.color = theme.colors.warning
+        row.name = {}
+        row.name.text = r.name + ""
+        row.name.color = theme.colors.success
+        row.domain = {}
+        row.domain.text = r.domain
+        row.domain.color = theme.colors.info
+        row.ips = {}
+        row.ips.text = r.ips.join(", ")
+        row.ips.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+CorvidUi.credentials = function(records)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["id", "type", "username", "password", "native", "tag", "ip", "lan"]
+    rows  = []
+    for r in records
+        // Current password display
+        passDisplay = r.password
+        if passDisplay.len == 0 then
+            if r.hasIndex("hash") and r.hash.len > 0 then
+                hashPreview = r.hash
+                if hashPreview.len > 8 then
+                    hashPreview = hashPreview[:8]
+                end if
+                passDisplay = "[" + hashPreview + "...]"
+            else
+                passDisplay = "(none)"
+            end if
+        end if
+        passColor = theme.colors.success
+        if r.password.len == 0 then
+            passColor = theme.colors.secondary
+        end if
+
+        // Native password display
+        nativeDisplay = ""
+        nativeColor   = theme.colors.secondary
+        if r.hasIndex("native_pass") and r.native_pass.len > 0 then
+            nativeDisplay = r.native_pass
+            nativeColor   = theme.colors.warning
+        end if
+
+        // Source tag and colour
+        src = "native"
+        if r.hasIndex("source") then
+            src = r.source
+        end if
+        tagColor = theme.colors.secondary
+        tagText  = src
+        if src == "native"            then
+            tagColor = theme.colors.success  ; tagText = "[native]"
+        end if
+        if src == "exploit_generated" then
+            tagColor = theme.colors.error    ; tagText = "[exploit]"
+        end if
+        if src == "hardened"          then
+            tagColor = theme.colors.warning  ; tagText = "[hardened]"
+        end if
+        if src == "harvest_updated"   then
+            tagColor = theme.colors.warning  ; tagText = "[updated]"
+        end if
+        if src == "sniffer"           then
+            tagColor = theme.colors.info     ; tagText = "[sniffed]"
+        end if
+        if src == "mail"              then
+            tagColor = theme.colors.info     ; tagText = "[mail]"
+        end if
+
+        row = {}
+        row.id = {}
+        row.id.text = r.id
+        row.id.color = theme.colors.warning
+        row.type = {}
+        row.type.text = r.type
+        row.type.color = theme.colors.info
+        row.username = {}
+        row.username.text = r.username
+        row.username.color = theme.colors.highlight
+        row.password = {}
+        row.password.text = passDisplay
+        row.password.color = passColor
+        row.native = {}
+        row.native.text = nativeDisplay
+        row.native.color = nativeColor
+        row.tag = {}
+        row.tag.text = tagText
+        row.tag.color = tagColor
+        row.ip = {}
+        row.ip.text = r.public_ip
+        row.ip.color = theme.colors.secondary
+        row.lan = {}
+        lanDisplay = ""
+        if r.hasIndex("lan_ip") then
+            lanDisplay = r.lan_ip
+        end if
+        row.lan.text = lanDisplay
+        row.lan.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+CorvidUi.targets = function(records)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["id", "public_ip", "lan_ip", "status", "privilege", "ports"]
+    rows  = []
+    for r in records
+        statusColor = theme.colors.secondary
+        if r.status == TARGET_STATUS.OWNED     then
+            statusColor = theme.colors.success
+        end if
+        if r.status == TARGET_STATUS.EXPLOITED then
+            statusColor = theme.colors.warning
+        end if
+        if r.status == TARGET_STATUS.SCANNED   then
+            statusColor = theme.colors.info
+        end if
+        if r.status == TARGET_STATUS.BOUNCE    then
+            statusColor = theme.colors.highlight
+        end if
+
+        portList = []
+        for p in r.ports
+            portList.push(str(p.port))
+        end for
+
+        row = {}
+        row.id = {}
+        row.id.text = r.id
+        row.id.color = theme.colors.warning
+        row.public_ip = {}
+        row.public_ip.text = r.public_ip
+        row.public_ip.color = theme.colors.info
+        row.lan_ip = {}
+        row.lan_ip.text = r.lan_ip
+        row.lan_ip.color = theme.colors.secondary
+        row.status = {}
+        row.status.text = r.status
+        row.status.color = statusColor
+        row.privilege = {}
+        row.privilege.text = r.privilege
+        row.privilege.color = theme.colors.success
+        row.ports = {}
+        row.ports.text = portList.join(", ")
+        row.ports.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+CorvidUi.exploitResults = function(results)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["id", "type", "privilege", "address", "exploit"]
+    rows  = []
+    i     = 0
+    for r in results
+        typeColor = theme.colors.secondary
+        if r.rtype == "shell" and r.privilege == "root" then
+            typeColor = theme.colors.success
+        else if r.rtype == "shell" then
+            typeColor = theme.colors.warning
+        else if r.rtype == "computer" then
+            typeColor = theme.colors.info
+        else if r.rtype == "file" then
+            typeColor = theme.colors.highlight
+        end if
+        row = {}
+        row.id = {}
+        row.id.text = str(i)
+        row.id.color = theme.colors.warning
+        row.type = {}
+        row.type.text = r.rtype
+        row.type.color = typeColor
+        row.privilege = {}
+        row.privilege.text = r.privilege
+        row.privilege.color = typeColor
+        row.address = {}
+        row.address.text = r.address
+        row.address.color = theme.colors.secondary
+        row.exploit = {}
+        row.exploit.text = r.exploit
+        row.exploit.color = theme.colors.secondary
+        rows.push(row)
+        i = i + 1
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Command history ----
+
+CorvidUi.history = function(commands)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["id", "command", "args"]
+    rows  = []
+    i     = 0
+    for cmd in commands
+        row = {}
+        row.id = {}
+        row.id.text = str(i)
+        row.id.color = theme.colors.warning
+        row.command = {}
+        cmdEntry = cmd[0]
+        row.command.text = cmdEntry.name
+        row.command.color = theme.colors.info
+        row.args = {}
+        row.args.text = cmd[1]
+        row.args.color = theme.colors.secondary
+        rows.push(row)
+        i = i + 1
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Help display ----
+
+CorvidUi.help = function(commands)
+    theme = self.mediator.getExtension("themeManager")
+    keys  = ["command", "args", "description"]
+    rows  = []
+    for cmd in commands
+        paramStr = ""
+        for param in cmd.parameters
+            if param.type == "flag" then
+                paramStr = paramStr + "(" + param.flag + ") "
+            else if param.required then
+                paramStr = paramStr + "[" + param.name + "] "
+            else
+                paramStr = paramStr + "(" + param.name + ") "
+            end if
+        end for
+        nameColor = theme.colors.error
+        if cmd.hasPermissions then
+            nameColor = theme.colors.success
+        end if
+        row = {}
+        cmdName = cmd.name
+        row.command = {}
+        row.command.text = cmdName
+        row.command.color = nameColor
+        trimmedArgs = paramStr.trim
+        row.args = {}
+        row.args.text = trimmedArgs
+        row.args.color = theme.colors.info
+        row.description = {}
+        row.description.text = cmd.description
+        row.description.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Whois display ----
+
+CorvidUi.whois = function(whoisData)
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("DOMAIN  : ") + theme.success(whoisData.domain))
+    print(theme.highlight("ADMIN   : ") + theme.text(whoisData.adminName))
+    print(theme.highlight("EMAIL   : ") + theme.info(whoisData.adminEmail))
+    if whoisData.hasIndex("phone") and whoisData.phone.len > 0 then
+        print(theme.highlight("PHONE   : ") + theme.text(whoisData.phone))
+    end if
+    self.separator()
+end function
+
+// ---- DB stats display ----
+
+CorvidUi.dbStats = function(stats)
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("DATABASE SUMMARY"))
+    print(theme.info("  Persons     : ") + theme.success(str(stats.persons)))
+    print(theme.info("  Orgs        : ") + theme.success(str(stats.orgs)))
+    print(theme.info("  Credentials : ") + theme.success(str(stats.credentials)))
+    print(theme.info("  Targets     : ") + theme.success(str(stats.targets)))
+    snifferCount = 0
+    if stats.hasIndex("sniffer") then
+        snifferCount = stats.sniffer
+    end if
+    print(theme.info("  Sniffer     : ") + theme.success(str(snifferCount) + " staged captures"))
+    self.separator()
+end function
+
+// ---- Init display ----
+
+CorvidUi.init = function()
+    self.showBanner()
+    libManager = self.mediator.getExtension("libManager")
+    dbManager  = self.mediator.getExtension("databaseManager")
+    theme      = self.mediator.getExtension("themeManager")
+
+    // Library status
+    meta = libManager.getCurrentLib(LIB_TYPES.METAXPLOIT)
+    if meta != null then
+        print(theme.success("[+] metaxploit.so loaded"))
+    else
+        print(theme.warning("[!] metaxploit.so not found"))
+    end if
+
+    crypto = libManager.getCurrentLib(LIB_TYPES.CRYPTO)
+    if crypto != null then
+        print(theme.success("[+] crypto.so loaded"))
+    else
+        print(theme.warning("[!] crypto.so not found"))
+    end if
+
+    // DB stats
+    print()
+    stats = dbManager.stats()
+    self.dbStats(stats)
+    print()
+end function
+
+
+// ---- Menu system ----
+
+CorvidUi.lastMenuOption = 0
+
+CorvidUi.menuHeader = function()
+    theme      = self.mediator.getExtension("themeManager")
+    dbManager  = self.mediator.getExtension("databaseManager")
+    sessionManager = self.mediator.getExtension("sessionManager")
+
+    stats   = dbManager.stats()
+    session = sessionManager.currentSession
+    handler = session.handler
+    ip      = session.data.ip
+
+    self.separator()
+    print(theme.highlight("  (oVo)  CORVID 2.0"))
+    self.separator()
+    print(theme.info("  Session : ") + theme.success(handler.user + "@" + handler.name() + "  [" + ip.public + "]  " + handler.privilege()))
+    print(theme.info("  DB      : ") + theme.secondary(str(stats.targets) + " targets  " + str(stats.credentials) + " creds  " + str(stats.persons) + " persons  " + str(stats.orgs) + " orgs"))
+    self.separator()
+    print()
+end function
+
+CorvidUi.menuOption = function(n, label, desc)
+    theme = self.mediator.getExtension("themeManager")
+    numStr = "  " + str(n) + ".  "
+    isLast = n == self.lastMenuOption
+    if isLast then
+        print(theme.highlight(numStr + label) + theme.secondary("  " + desc + " <"))
+    else
+        print(theme.secondary(numStr) + theme.text(label) + theme.secondary("  " + desc))
+    end if
+end function
+
+CorvidUi.showMenu = function()
+    theme = self.mediator.getExtension("themeManager")
+    self.menuHeader()
+    self.menuOption(1,  "Attack",    "guided recon and exploit workflow")
+    self.menuOption(2,  "Sessions",  "view and switch active sessions")
+    self.menuOption(3,  "Database",  "persons, orgs, credentials, targets, sync")
+    self.menuOption(4,  "Bounce",    "manage bounce chain")
+    self.menuOption(5,  "Intel",     "harvest, whois, getpass")
+    self.menuOption(6,  "Flock",     "flock connections")
+    self.menuOption(7,  "Roost",     "roost node management")
+    self.menuOption(8,  "Platform",  "attack platform deployment")
+    self.menuOption(9,  "Macros",    "run and list macros")
+    self.menuOption(10, "Config",    "theme, aliases, settings")
+    print(theme.secondary("  Type a number, any command, or 0/menu to return here."))
+    print()
+end function
+
+CorvidUi.showDatabaseMenu = function()
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("  DATABASE"))
+    self.separator()
+    print(theme.secondary("  1.  ") + theme.text("Persons"))
+    print(theme.secondary("  2.  ") + theme.text("Organisations"))
+    print(theme.secondary("  3.  ") + theme.text("Credentials"))
+    print(theme.secondary("  4.  ") + theme.text("Targets"))
+    print(theme.secondary("  5.  ") + theme.text("Stats"))
+    print(theme.secondary("  6.  ") + theme.text("Save databases"))
+    print(theme.secondary("  7.  ") + theme.text("Sync push   ") + theme.secondary("send local DB to another server"))
+    print(theme.secondary("  8.  ") + theme.text("Sync pull   ") + theme.secondary("fetch DB from another server"))
+    print(theme.secondary("  9.  ") + theme.text("Merge       ") + theme.secondary("merge incoming/ files into live DB"))
+    print(theme.secondary("  0.  ") + theme.text("Back"))
+    print()
+end function
+
+CorvidUi.showBounceMenu = function()
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("  BOUNCE NETWORK"))
+    self.separator()
+    print(theme.secondary("  1.  ") + theme.text("Map         ") + theme.secondary("show bounce network"))
+    print(theme.secondary("  2.  ") + theme.text("Update      ") + theme.secondary("auto-populate from owned targets, clean dead"))
+    print(theme.secondary("  3.  ") + theme.text("Verify      ") + theme.secondary("health check all bounces"))
+    print(theme.secondary("  4.  ") + theme.text("Chain       ") + theme.secondary("random 5-hop chain (chain max for all)"))
+    print(theme.secondary("  5.  ") + theme.text("Harden      ") + theme.secondary("upgrade ssh, change passwords, chmod"))
+    print(theme.secondary("  6.  ") + theme.text("Wipe        ") + theme.secondary("wipe logs on all bounces"))
+    print(theme.secondary("  7.  ") + theme.text("Remove      ") + theme.secondary("remove a single bounce by IP"))
+    print(theme.secondary("  8.  ") + theme.text("Add manual  ") + theme.secondary("manually add a bounce point"))
+    print(theme.secondary("  9.  ") + theme.text("Reset IP    ") + theme.secondary("clear removed marker to re-add a bounce"))
+    print(theme.secondary("  10. ") + theme.text("Revive      ") + theme.secondary("re-test dead bounces and ssh_default targets"))
+    print(theme.secondary("  11. ") + theme.text("Restore     ") + theme.secondary("rebuild last chain after interrupted session"))
+    print(theme.secondary("  0.  ") + theme.text("Back"))
+    print()
+end function
+
+CorvidUi.showFlockMenu = function()
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("  FLOCK"))
+    self.separator()
+    print(theme.secondary("  1.  ") + theme.text("Build       ") + theme.secondary("compile flock client binary (bakes in Nest IP)"))
+    print(theme.secondary("  2.  ") + theme.text("Status      ") + theme.secondary("check port forwarding and binary status"))
+    print(theme.secondary("  3.  ") + theme.text("Deploy      ") + theme.secondary("deploy client to current session (Funny Game)"))
+    print(theme.secondary("  4.  ") + theme.text("List        ") + theme.secondary("show active flock connections"))
+    print(theme.secondary("  5.  ") + theme.text("Adopt       ") + theme.secondary("adopt a connection as Corvid session"))
+    print(theme.secondary("  0.  ") + theme.text("Back"))
+    print()
+end function
+
+CorvidUi.showIntelMenu = function()
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("  INTEL"))
+    self.separator()
+    print(theme.secondary("  1.  ") + theme.text("Harvest      ") + theme.secondary("full harvest on current target"))
+    print(theme.secondary("  2.  ") + theme.text("Whois        ") + theme.secondary("lookup domain info"))
+    print(theme.secondary("  3.  ") + theme.text("Getpass      ") + theme.secondary("crack passwords from passwd file"))
+    print(theme.secondary("  4.  ") + theme.text("ScanLan      ") + theme.secondary("upload and run ScanLan on target"))
+    print(theme.secondary("  5.  ") + theme.text("SMTP grab    ") + theme.secondary("enumerate SMTP users on current or specified IP"))
+    print(theme.secondary("  6.  ") + theme.text("Sniffer >    ") + theme.secondary("sniffer deploy, collect, list, promote, clean"))
+    print(theme.secondary("  0.  ") + theme.text("Back"))
+    print()
+end function
+
+CorvidUi.showSnifferMenu = function()
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("  SNIFFER"))
+    self.separator()
+    print(theme.secondary("  1.  ") + theme.text("Deploy       ") + theme.secondary("deploy call-home sniffer to current session"))
+    print(theme.secondary("  2.  ") + theme.text("Collect      ") + theme.secondary("pull captures from a specific host"))
+    print(theme.secondary("  3.  ") + theme.text("Coll. roosts ") + theme.secondary("pull captures from all active roost nodes"))
+    print(theme.secondary("  4.  ") + theme.text("List         ") + theme.secondary("show all staged sniffer captures"))
+    print(theme.secondary("  5.  ") + theme.text("Promote      ") + theme.secondary("push captures into credential DB"))
+    print(theme.secondary("  6.  ") + theme.text("Clean        ") + theme.secondary("remove sniffer files from current session"))
+    print(theme.secondary("  0.  ") + theme.text("Back"))
+    print()
+end function
+
+CorvidUi.showRoostMenu = function()
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("  ROOST"))
+    self.separator()
+    print(theme.secondary("  1.  ") + theme.text("Convert     ") + theme.secondary("convert active flock to persistent roost node"))
+    print(theme.secondary("  2.  ") + theme.text("List        ") + theme.secondary("show all roost nodes"))
+    print(theme.secondary("  3.  ") + theme.text("Pick        ") + theme.secondary("adopt least-recently-used node as session"))
+    print(theme.secondary("  4.  ") + theme.text("Verify      ") + theme.secondary("health check all nodes"))
+    print(theme.secondary("  5.  ") + theme.text("Nuke        ") + theme.secondary("kill process, clean files, retire node"))
+    print(theme.secondary("  6.  ") + theme.text("Sweep       ") + theme.secondary("check dead nodes for reconnection"))
+    print(theme.secondary("  7.  ") + theme.text("Clean       ") + theme.secondary("remove permanently dead nodes"))
+    print(theme.secondary("  0.  ") + theme.text("Back"))
+    print()
+end function
+
+CorvidUi.showPlatformMenu = function()
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("  ATTACK PLATFORM"))
+    self.separator()
+    print(theme.secondary("  1.  ") + theme.text("Build       ") + theme.secondary("compile node-attacker and node-router binaries on Nest"))
+    print(theme.secondary("  2.  ") + theme.text("Deploy      ") + theme.secondary("upload agent to roost node with target job"))
+    print(theme.secondary("  3.  ") + theme.text("Run         ") + theme.secondary("launch agent on roost node"))
+    print(theme.secondary("  4.  ") + theme.text("Collect     ") + theme.secondary("import results into Corvid DB"))
+    print(theme.secondary("  5.  ") + theme.text("Clean       ") + theme.secondary("delete agent files from node"))
+    print(theme.secondary("  6.  ") + theme.text("Sniffer     ") + theme.secondary("run sniffer on roost node network"))
+    print(theme.secondary("  7.  ") + theme.text("Collect S   ") + theme.secondary("collect sniffer results from node"))
+    print(theme.secondary("  0.  ") + theme.text("Back"))
+    print()
+end function
+
+CorvidUi.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+CorvidUi.New = function()
+    if CorvidUi.singleton != null then
+        return CorvidUi.singleton
+    end if
+    instance = new CorvidUi
+    CorvidUi.singleton = instance
+    return instance
+end function
+
+CorvidUi.showSettingsMenu = function(configManager)
+    theme = self.mediator.getExtension("themeManager")
+    self.separator()
+    print(theme.highlight("  CORVID SETTINGS"))
+    self.separator()
+
+    // Read current values
+    autoShiny  = configManager.get("autoShiny")
+    autoWhois  = configManager.get("autoWhois")
+    autoSmtp   = configManager.get("autoSmtp")
+    autoOwn    = configManager.get("autoOwn")
+    kbFallback = configManager.get("kbFallback")
+    if autoShiny isa Error then
+        autoShiny = "1"
+    end if
+    if autoWhois isa Error then
+        autoWhois = "1"
+    end if
+    if autoSmtp isa Error then
+        autoSmtp = "1"
+    end if
+    if autoOwn isa Error then
+        autoOwn = "1"
+    end if
+    if kbFallback isa Error then
+        kbFallback = "1"
+    end if
+
+    onStr  = theme.success("ON ")
+    offStr = theme.warning("OFF")
+
+    self.separator()
+    print(theme.highlight("  AUTOMATION TOGGLES"))
+    self.separator()
+
+    s1 = onStr
+    if autoShiny != "1" then
+        s1 = offStr
+    end if
+    s2 = onStr
+    if autoWhois != "1" then
+        s2 = offStr
+    end if
+    s3 = onStr
+    if autoSmtp != "1" then
+        s3 = offStr
+    end if
+    s4 = onStr
+    if autoOwn != "1" then
+        s4 = offStr
+    end if
+    s5 = onStr
+    if kbFallback != "1" then
+        s5 = offStr
+    end if
+
+    print("  [1]  " + s1 + "  " + theme.text("autoShiny  ") + theme.secondary("score libs during port scan + baseline Nest scan on first run"))
+    print("  [2]  " + s2 + "  " + theme.text("autoWhois  ") + theme.secondary("whois lookup during guided attack Phase 1"))
+    print("  [3]  " + s3 + "  " + theme.text("autoSmtp   ") + theme.secondary("SMTP user enumeration when smtp port detected during attack"))
+    print("  [4]  " + s4 + "  " + theme.text("autoOwn    ") + theme.secondary("prompt to mark target as owned at end of attack"))
+    print("  [5]  " + s5 + "  " + theme.text("kbFallback ") + theme.secondary("run full port scan when no KB hits found"))
+    self.separator()
+    print(theme.highlight("  OTHER"))
+    self.separator()
+    print("  [6]  " + theme.text("Aliases     ") + theme.secondary("view and manage command shortcuts"))
+    print("  [7]  " + theme.text("Theme       ") + theme.secondary("customise colours  (theme <slot> <hex>)"))
+    self.separator()
+    print(theme.secondary("  Select a toggle to flip it, 6-7 for other settings, 0 to go back."))
+    print()
+end function

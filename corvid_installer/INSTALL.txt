@@ -1,0 +1,33 @@
+CORVID — INSTALLATION
+=========================
+
+STEP 1 — Run installer scripts 0-7 in Code Editor
+---------------------------------------------------
+Run each in order. For each: open in Code Editor, Save, Build, Run.
+Wait for completion before starting the next.
+
+  installer0.src  through  installer6.src  — write source files
+  installer7.src  — builds /Corvid/corvid binary
+
+You will see: "Build successful! Run /Corvid/corvid"
+
+
+STEP 2 — Copy tools folder manually via FileExplorer
+-----------------------------------------------------
+  tools/node-attacker.src    ->  /Corvid/tools/node-attacker.src
+  tools/node-router.src      ->  /Corvid/tools/node-router.src
+  tools/csniffer.src         ->  /Corvid/tools/csniffer.src
+  tools/rot.src              ->  /Corvid/tools/rot.src
+  tools/chainsaw/            ->  /Corvid/tools/chainsaw/   (whole folder)
+
+
+STEP 3 — Launch Corvid and build tool binaries
+-----------------------------------------------
+  /Corvid/corvid
+  platform build    <- compiles node-attacker and node-router
+  chainsaw build    <- compiles standalone chainsaw tool
+
+
+PORT FORWARDING
+---------------
+Port 1222 must be forwarded on your Nest router for flock/roost to work.

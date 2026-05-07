@@ -1,0 +1,189 @@
+// ============================================================
+// CORVID 2.0 | managers/command/command-manager
+// Command registry, queue, history, alias resolution,
+// macro dispatch, and permission checking.
+// ============================================================
+
+CommandManager = {}
+CommandManager.mediator  = null
+CommandManager.commands  = {}
+CommandManager.aliases   = {}
+CommandManager.queue     = []
+CommandManager.history   = []
+
+CommandManager.register = function(command)
+    if command isa Error then
+        return command
+    end if
+    self.commands[command.name] = command
+end function
+
+CommandManager.unregister = function(name)
+    if self.commands.hasIndex(name) then
+        self.commands.remove(name)
+    end if
+end function
+
+CommandManager.getCommand = function(name)
+    if not self.commands.hasIndex(name) or self.commands[name] == null then
+        return Error.New("Unknown command: " + name, "UNKNOWN_COMMAND")
+    end if
+    return self.commands[name]
+end function
+
+CommandManager.execute = function(input)
+    input = input.trim
+    if input.len == 0 then
+        return
+    end if
+
+    // Resolve alias
+    parts   = input.split(" ")
+    cmdName = parts[0]
+    argParts = parts[1:]
+    args    = argParts.join(" ")
+
+    if self.aliases.hasIndex(cmdName) then
+        aliasVal  = self.aliases[cmdName]
+        aliasParts = aliasVal.split(" ")
+        cmdName   = aliasParts[0]
+        aliasArgParts = aliasParts[1:]
+    aliasArgs = aliasArgParts.join(" ")
+        if aliasArgs.len > 0 then
+            args = aliasArgs + " " + args
+        end if
+    end if
+
+    // Macro dispatch via @macroname
+    if cmdName.indexOf("@") == 0 then
+        macroManager = self.mediator.getExtension("macroManager")
+        if macroManager != null then
+            return macroManager.runMacro(cmdName[1:])
+        end if
+        return Error.New("No macro manager available", "NO_MACRO_MANAGER")
+    end if
+
+    command = self.getCommand(cmdName)
+    if command isa Error then
+        self.queue.push(command)
+        return
+    end if
+
+    self.queue.push([command, args])
+end function
+
+CommandManager.run = function()
+    while self.queue.len > 0
+        item = self.queue.pull()
+        if item isa Error then
+            self.printResult(item)
+            self.queue = []
+            return
+        end if
+
+        // Check permissions
+        permCheck = self.checkPermissions(item[0])
+        if permCheck isa Error then
+            self.printResult(permCheck)
+            return
+        end if
+
+        // Execute
+        self.history.insert(0, item)
+        cmd = item[0]
+    result = cmd.execute(item[1], self.mediator)
+        self.printResult(result)
+    end while
+end function
+
+CommandManager.checkPermissions = function(command)
+    sessionManager = self.mediator.getExtension("sessionManager")
+    if sessionManager == null then
+        return
+    end if
+    session  = sessionManager.currentSession
+    if session == null then
+        return
+    end if
+    handler  = session.handler
+    objType  = handler.type()
+    priv     = handler.privilege()
+
+    if not self.checkObject(objType, command.permissions.object) then
+        return Error.New("This command requires " + command.permissions.object + " access", "PERMISSION_DENIED")
+    end if
+    if not self.checkPrivilege(priv, command.permissions.privilege) then
+        return Error.New("This command requires " + command.permissions.privilege + " privilege", "PERMISSION_DENIED")
+    end if
+end function
+
+CommandManager.checkObject = function(current, required)
+    if required == null or required == "file"     then
+        return true
+    end if
+    if required == "computer" then
+        return current == "computer" or current == "shell"
+    end if
+    if required == "shell" then
+        return current == "shell"
+    end if
+    return false
+end function
+
+CommandManager.checkPrivilege = function(current, required)
+    if required == null or required == "guest"  then
+        return true
+    end if
+    if current == "unknown" then
+        return true
+    end if
+    if required == "user"   then
+        return current == "root" or current == "user"
+    end if
+    if required == "root"   then
+        return current == "root"
+    end if
+    return false
+end function
+
+CommandManager.printResult = function(result)
+    if result == null then
+        return
+    end if
+    if result isa Error then
+        ui = self.mediator.getExtension("corvidUi")
+        if ui != null then
+            ui.error(result.message)
+        else
+            // Use basic red for error when UI system not available
+            print("<color=#FF0000>[!] " + result.message + "</color>")
+        end if
+        return
+    end if
+    if typeof(result) == "string" then
+        print(result)
+    end if
+end function
+
+CommandManager.addAlias = function(alias, target)
+    self.aliases[alias] = target
+end function
+
+CommandManager.removeAlias = function(alias)
+    if self.aliases.hasIndex(alias) then
+        self.aliases.remove(alias)
+    end if
+end function
+
+CommandManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+CommandManager.New = function()
+    result = new CommandManager
+    result.commands = {}
+    result.aliases  = {}
+    result.queue    = []
+    result.history  = []
+    return result
+end function

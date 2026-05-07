@@ -1,0 +1,2940 @@
+s = get_shell;c = s.host_computer;m = function(filePath, content, isNew);    segments = filePath.split("/")[1:];    fileName = segments.pop;    for segment in segments;        __segment_idx = segments.indexOf(segment);        parentPath = "/" + segments[:__segment_idx].join("/");        if parentPath == "/" then;            folderPath = "/" + segment;        else;            folderPath = parentPath + "/" + segment;        end if;        folderHandle = c.File(folderPath);        if folderHandle == null then;            result = c.create_folder(parentPath, segment);            if result != 1 then;                exit("Could not create folder: " + folderPath);            end if;        end if;    end for;    parentPath = "/" + segments.join("/");    fileEntity = c.File(filePath);    if fileEntity == null then;        result = c.touch(parentPath, fileName);        if result != 1 then;            exit("Could not create file: " + filePath);        end if;        fileEntity = c.File(filePath);    end if;    if isNew then;        fileEntity.set_content(content);        print("Written: " + filePath);    else;        fileEntity.set_content(fileEntity.get_content + content);        print("Appended: " + filePath);    end if;end function
+m("/Corvid/asriN/managers/config-manager.txt","// ============================================================
+// CORVID | managers/config/config-manager
+// Persists configuration to /Config/corvid-config.json
+// on the pivot session. Loaded once on startup, saved
+// whenever a setting changes.
+// ============================================================
+
+ConfigManager = {}
+ConfigManager.mediator = null
+ConfigManager.config   = {}
+
+ConfigManager.getConfigPath = function()
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler        = sessionManager.pivotSession.handler
+    user           = handler.user
+
+    cfgDir = ""/home/guest/Config""
+    if user == ""root"" then
+        cfgDir = ""/root/Config""
+    else if user != ""guest"" then
+        cfgDir = ""/home/"" + user + ""/Config""
+    end if
+
+    folder = handler.getFile(cfgDir)
+    if folder isa Error then
+        return folder
+    end if
+
+    return cfgDir + ""/corvid-config.json""
+end function
+
+ConfigManager.init = function()
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler        = sessionManager.pivotSession.handler
+
+    path = self.getConfigPath()
+    if path isa Error then
+        return path
+    end if
+
+    file = handler.getFile(path)
+    if file isa Error then
+        // Create with defaults
+        result = handler.createFile(path)
+        if result isa Error then
+            return result
+        end if
+        file = handler.getFile(path)
+        if file isa Error then
+            return file
+        end if
+        self.config = self.defaults()
+        file.setContent(toJSON(self.config))
+        return
+    end if
+
+    content = file.content()
+    if content isa Error or content.len == 0 then
+        self.config = self.defaults()
+        file.setContent(toJSON(self.config))
+        return
+    end if
+
+    parsed = parse(content)
+    if parsed == null then
+        self.config = self.defaults()
+    else
+        // Merge with defaults so new keys always exist
+        self.config = self.defaults() + parsed
+    end if
+end function
+
+ConfigManager.defaults = function()
+    d = {}
+    d.theme = {}
+    d.theme.highlight = ""#8B00FF""
+    d.theme.text      = ""#ffffff""
+    d.theme.secondary = ""#555555""
+    d.theme.success   = ""#00ff00""
+    d.theme.warning   = ""#FFFC33""
+    d.theme.info      = ""#058FAB""
+    d.theme.danger    = ""#FF4444""
+    d.theme.error     = ""#FF4444""
+    d.aliases = {}
+    d.rshellPort = 1222
+    d.autoSave   = true
+    d.autoWhois  = true
+    return d
+end function
+
+ConfigManager.get = function(key)
+    if not self.config.hasIndex(key) then
+        return Error.New(""Config key not found: "" + key, ""NOT_FOUND"")
+    end if
+    return self.config[key]
+end function
+
+ConfigManager.set = function(key, value)
+    self.config[key] = value
+    return self.save()
+end function
+
+ConfigManager.merge = function(data)
+    for kv in data
+        self.config[kv.key] = kv.value
+    end for
+    return self.save()
+end function
+
+ConfigManager.save = function()
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler        = sessionManager.pivotSession.handler
+    path           = self.getConfigPath()
+    if path isa Error then
+        return path
+    end if
+    file = handler.getFile(path)
+    if file isa Error then
+        return file
+    end if
+    return file.setContent(toJSON(self.config))
+end function
+
+ConfigManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+ConfigManager.New = function()
+    result = new ConfigManager
+    result.config = {}
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/theme-manager.txt","// ============================================================
+// CORVID | managers/theme/theme-manager
+// Color scheme management. Colors stored in config.
+// Default theme is Corvid purple/green/amber.
+// All UI output goes through theme color functions.
+// ============================================================
+
+THEME = {}
+THEME.HIGHLIGHT = ""highlight""
+THEME.TEXT      = ""text""
+THEME.SECONDARY = ""secondary""
+THEME.SUCCESS   = ""success""
+THEME.WARNING   = ""warning""
+THEME.INFO      = ""info""
+THEME.DANGER    = ""danger""
+THEME.ERROR     = ""error""
+
+ThemeManager = {}
+ThemeManager.mediator = null
+ThemeManager.colors   = {}
+
+ThemeManager.init = function()
+    configManager = self.mediator.getExtension(""configManager"")
+    theme = configManager.get(""theme"")
+    if theme isa Error then
+        self.colors = self.defaultColors()
+    else
+        self.colors = self.defaultColors() + theme
+    end if
+end function
+
+ThemeManager.defaultColors = function()
+    c = {}
+    c.highlight = ""#8B00FF""
+    c.text      = ""#ffffff""
+    c.secondary = ""#555555""
+    c.success   = ""#00ff00""
+    c.warning   = ""#FFFC33""
+    c.info      = ""#058FAB""
+    c.danger    = ""#FF4444""
+    c.error     = ""#FF4444""
+    return c
+end function
+
+ThemeManager.colorize = function(colorName, str)
+    if not self.colors.hasIndex(colorName) then
+        return str
+    end if
+    hex = self.colors[colorName]
+    return ""<color="" + hex + "">"" + str + ""</color>""
+end function
+
+ThemeManager.highlight = function(str)
+    return self.colorize(THEME.HIGHLIGHT, str)
+end function
+
+ThemeManager.text = function(str)
+    return self.colorize(THEME.TEXT, str)
+end function
+
+ThemeManager.secondary = function(str)
+    return self.colorize(THEME.SECONDARY, str)
+end function
+
+ThemeManager.success = function(str)
+    return self.colorize(THEME.SUCCESS, str)
+end function
+
+ThemeManager.warning = function(str)
+    return self.colorize(THEME.WARNING, str)
+end function
+
+ThemeManager.info = function(str)
+    return self.colorize(THEME.INFO, str)
+end function
+
+ThemeManager.danger = function(str)
+    return self.colorize(THEME.DANGER, str)
+end function
+
+ThemeManager.error = function(str)
+    return self.colorize(THEME.ERROR, str)
+end function
+
+ThemeManager.setColor = function(colorName, hex)
+    self.colors[colorName] = hex
+    configManager = self.mediator.getExtension(""configManager"")
+    configManager.set(""theme"", self.colors)
+end function
+
+ThemeManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+ThemeManager.New = function()
+    result = new ThemeManager
+    result.colors = {}
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/corvid-ui.txt","// ============================================================
+// CORVID | managers/ui/corvid-ui
+// All display and formatting logic.
+// Every print statement in the entire codebase goes through
+// here. Themed output, table rendering, banner, prompt.
+// ============================================================
+
+CorvidUi = {}
+CorvidUi.singleton = null
+CorvidUi.mediator  = null
+
+// ---- Raw themed print helpers ----
+
+CorvidUi.print = function(str)
+    if str == null then
+        str = """"
+    end if
+    print(str)
+end function
+
+CorvidUi.success = function(str)
+    theme = self.mediator.getExtension(""themeManager"")
+    print(theme.success(""[+] "" + str))
+end function
+
+CorvidUi.warning = function(str)
+    theme = self.mediator.getExtension(""themeManager"")
+    print(theme.warning(""[!] "" + str))
+end function
+
+CorvidUi.error = function(str)
+    theme = self.mediator.getExtension(""themeManager"")
+    print(theme.error(""[!] "" + str))
+end function
+
+CorvidUi.info = function(str)
+    theme = self.mediator.getExtension(""themeManager"")
+    print(theme.info(""[*] "" + str))
+end function
+
+CorvidUi.highlight = function(str)
+    theme = self.mediator.getExtension(""themeManager"")
+    print(theme.highlight(str))
+end function
+
+CorvidUi.dim = function(str)
+    theme = self.mediator.getExtension(""themeManager"")
+    print(theme.secondary(str))
+end function
+
+CorvidUi.separator = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    print(theme.secondary(""--------------------------------------------""))
+end function
+
+// ---- Banner ----
+
+CorvidUi.showBanner = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    banner = char(10) + theme.secondary(""================================"") + char(10) 
+    banner = banner + theme.highlight(""           (oVo)              "") + char(10) 
+    banner = banner + theme.highlight(""          // ^ "" + char(92) + char(92) + ""             "") + char(10) 
+    banner = banner + theme.highlight(""       C O R V I D            "") + char(10) 
+    banner = banner + theme.highlight("" Thought and memory, with wings"") + char(10) 
+    banner = banner + theme.secondary(""================================"")
+    print(banner)
+    print()
+end function
+
+// ---- Prompt ----
+
+CorvidUi.prompt = function(session)
+    theme           = self.mediator.getExtension(""themeManager"")
+    platformManager = self.mediator.getExtension(""platformManager"")
+    handler = session.handler
+    ip      = session.data.ip
+    name    = """"
+
+    if handler.type() == ""shell"" or handler.type() == ""computer"" then
+        name = handler.name()
+    end if
+
+    user    = handler.user
+    pubIp   = ip.public
+    lanIp   = ip.local
+    path    = handler.path()
+    hType   = handler.type()
+    priv    = handler.privilege()
+
+    promptStr = theme.secondary(""("") + theme.highlight(user) + theme.secondary(""@"") + theme.highlight(name) + theme.secondary("")"") + theme.secondary(""["") + theme.info(pubIp) + theme.secondary(""|"") + theme.info(lanIp) + theme.secondary(""]"") + theme.secondary(""["") + theme.warning(path) + theme.secondary(""]"") + theme.secondary(""["") + theme.success(priv) + theme.secondary(""]"")
+
+    // Show platform mode indicator when active
+    if platformManager != null and platformManager.active then
+        promptStr = promptStr + theme.secondary(""["") + theme.warning(""via "") + theme.highlight(platformManager.nodeIp) + theme.secondary(""]"")
+    end if
+
+    promptStr = promptStr + theme.secondary("" "") + theme.highlight(""$ "")
+
+    return promptStr
+end function
+
+// ---- Table rendering ----
+
+CorvidUi.table = function(keys, rows)
+    theme = self.mediator.getExtension(""themeManager"")
+
+    // Calculate column widths
+    widths = {}
+    for key in keys
+        widths[key] = key.len
+    end for
+    for row in rows
+        for key in keys
+            if row.hasIndex(key) then
+                cellLen = (row[key].text + """").len
+                if cellLen > widths[key] then
+                    widths[key] = cellLen
+                end if
+            end if
+        end for
+    end for
+
+    // Header
+    headerStr = """"
+    for key in keys
+        headerStr = headerStr + theme.highlight(padRight(upper(key), widths[key] + 2))
+    end for
+    print(headerStr)
+
+    // Separator
+    sepStr = """"
+    for key in keys
+        dashes = """"
+        for i in range(0, key.len - 1)
+            dashes = dashes + ""-""
+        end for
+        sepStr = sepStr + theme.secondary(padRight(dashes, widths[key] + 2))
+    end for
+    print(sepStr)
+
+    // Rows
+    for row in rows
+        rowStr = """"
+        for key in keys
+            cell = {""text"": """", ""color"": null}
+            if row.hasIndex(key) then
+                cell = row[key]
+            end if
+            padded = padRight(cell.text + """", widths[key] + 2)
+            if cell.color != null then
+                rowStr = rowStr + ""<color="" + cell.color + "">"" + padded + ""</color>""
+            else
+                rowStr = rowStr + theme.text(padded)
+            end if
+        end for
+        print(rowStr)
+    end for
+    print()
+end function
+
+// ---- Session list display ----
+
+CorvidUi.sessions = function(sessions)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""id"", ""type"", ""user"", ""public_ip"", ""local_ip"", ""priv"", ""label""]
+    rows  = []
+    i     = 0
+    for session in sessions
+        handler = session.handler
+        ip      = session.data.ip
+        row     = {}
+        row.id = {}
+        row.id.text = str(i)
+        row.id.color = theme.colors.warning
+        row.type = {}
+        row.type.text = handler.type()
+        row.type.color = theme.colors.info
+        row.user = {}
+        row.user.text = handler.user
+        row.user.color = theme.colors.success
+        row.public_ip = {}
+        row.public_ip.text = ip.public
+        row.public_ip.color = theme.colors.info
+        row.local_ip = {}
+        row.local_ip.text = ip.local
+        row.local_ip.color = theme.colors.secondary
+        row.priv = {}
+        row.priv.text = handler.privilege()
+        row.priv.color = theme.colors.highlight
+        row.label = {}
+        row.label.text = session.label
+        row.label.color = theme.colors.secondary
+        rows.push(row)
+        i = i + 1
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Library list display ----
+
+CorvidUi.libs = function(libs, currentLibs, pivotLibs)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""id"", ""type"", ""version"", ""public_ip"", ""local_ip"", ""current"", ""pivot""]
+    rows  = []
+    i     = 0
+    for lib in libs
+        row = {}
+        isCurrent = currentLibs.hasIndex(lib.type) and currentLibs[lib.type] == lib
+        isPivot   = pivotLibs.hasIndex(lib.type)   and pivotLibs[lib.type]   == lib
+        row.id = {}
+        row.id.text = str(i)
+        row.id.color = theme.colors.warning
+        row.type = {}
+        row.type.text = lib.type + """"
+        row.type.color = theme.colors.info
+        row.version = {}
+        row.version.text = lib.data.version
+        row.version.color = theme.colors.secondary
+        row.public_ip = {}
+        row.public_ip.text = lib.data.ip.public
+        row.public_ip.color = theme.colors.info
+        row.local_ip = {}
+        row.local_ip.text = lib.data.ip.local
+        row.local_ip.color = theme.colors.secondary
+        row.current = {}
+        row.current.text = """"
+        row.current.color = theme.colors.secondary
+        row.pivot = {}
+        row.pivot.text = """"
+        row.pivot.color = theme.colors.secondary
+        if isCurrent then
+            row.current.text = ""  *""
+            row.current.color = theme.colors.success
+        end if
+        if isPivot then
+            row.pivot.text = ""  *""
+            row.pivot.color = theme.colors.highlight
+        end if
+        rows.push(row)
+        i = i + 1
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Process list display ----
+
+CorvidUi.processes = function(procs)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""user"", ""pid"", ""cpu"", ""mem"", ""command""]
+    rows  = []
+    for proc in procs
+        row = {}
+        userVal = """"
+        if proc.hasIndex(""USER"") then
+            userVal = proc.USER
+        end if
+        pidVal = """"
+        if proc.hasIndex(""PID"") then
+            pidVal = proc.PID
+        end if
+        cpuVal = """"
+        if proc.hasIndex(""CPU"") then
+            cpuVal = proc.CPU
+        end if
+        memVal = """"
+        if proc.hasIndex(""MEM"") then
+            memVal = proc.MEM
+        end if
+        cmdVal = """"
+        if proc.hasIndex(""COMMAND"") then
+            cmdVal = proc.COMMAND
+        end if
+        row.user = {}
+        row.user.text = userVal
+        row.user.color = theme.colors.success
+        row.pid = {}
+        row.pid.text = pidVal
+        row.pid.color = theme.colors.warning
+        row.cpu = {}
+        row.cpu.text = cpuVal
+        row.cpu.color = theme.colors.info
+        row.mem = {}
+        row.mem.text = memVal
+        row.mem.color = theme.colors.info
+        row.command = {}
+        row.command.text = cmdVal
+        row.command.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- File system listing ----
+
+CorvidUi.ls = function(children)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""permissions"", ""owner"", ""name"", ""size""]
+    rows  = []
+    for child in children
+        row = {}
+        nameColor = theme.colors.info
+        if child.type() == FILE_TYPES.FILE then
+            nameColor = theme.colors.secondary
+        end if
+        row.permissions = {}
+        row.permissions.text = child.permissions()
+        row.permissions.color = theme.colors.warning
+        row.owner = {}
+        row.owner.text = child.owner()
+        row.owner.color = theme.colors.success
+        row.name = {}
+        row.name.text = child.name()
+        row.name.color = nameColor
+        row.size = {}
+        row.size.text = str(child.size())
+        row.size.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- File system tree ----
+
+CorvidUi.fileSystemTree = function(file, depth)
+    theme = self.mediator.getExtension(""themeManager"")
+    if depth == null then
+        depth = 0
+    end if
+
+    indent = """"
+    for i in range(0, depth - 1)
+        indent = indent + ""  ""
+    end for
+    if depth > 0 then
+        indent = indent + ""-""
+    end if
+
+    nameColor = theme.colors.info
+    if file.type() == FILE_TYPES.FILE then
+        nameColor = theme.colors.secondary
+    end if
+
+    line = indent + "" "" + theme.warning(file.permissions()) + "" "" + theme.success(file.owner()) + "" "" + ""<color="" + nameColor + "">"" + file.name() + ""</color>"" + "" "" + theme.secondary(str(file.size()))
+    print(line)
+
+    if file.type() == FILE_TYPES.FOLDER then
+        kids = file.children()
+        if not (kids isa Error) then
+            for kid in kids
+                self.fileSystemTree(kid, depth + 1)
+            end for
+        end if
+    end if
+end function
+
+// ---- Database record displays ----
+
+CorvidUi.persons = function(records)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""id"", ""name"", ""email"", ""org_id"", ""source""]
+    rows  = []
+    for r in records
+        row = {}
+        row.id = {}
+        row.id.text = r.id
+        row.id.color = theme.colors.warning
+        row.name = {}
+        row.name.text = r.name + """"
+        row.name.color = theme.colors.success
+        row.email = {}
+        row.email.text = r.email
+        row.email.color = theme.colors.info
+        row.org_id = {}
+        row.org_id.text = r.org_id
+        row.org_id.color = theme.colors.secondary
+        row.source = {}
+        row.source.text = r.source
+        row.source.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+CorvidUi.orgs = function(records)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""id"", ""name"", ""domain"", ""ips""]
+    rows  = []
+    for r in records
+        row = {}
+        row.id = {}
+        row.id.text = r.id
+        row.id.color = theme.colors.warning
+        row.name = {}
+        row.name.text = r.name + """"
+        row.name.color = theme.colors.success
+        row.domain = {}
+        row.domain.text = r.domain
+        row.domain.color = theme.colors.info
+        row.ips = {}
+        row.ips.text = r.ips.join("", "")
+        row.ips.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+CorvidUi.credentials = function(records)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""id"", ""type"", ""username"", ""password"", ""native"", ""tag"", ""ip"", ""lan""]
+    rows  = []
+    for r in records
+        // Current password display
+        passDisplay = r.password
+        if passDisplay.len == 0 then
+            if r.hasIndex(""hash"") and r.hash.len > 0 then
+                hashPreview = r.hash
+                if hashPreview.len > 8 then
+                    hashPreview = hashPreview[:8]
+                end if
+                passDisplay = ""["" + hashPreview + ""...]""
+            else
+                passDisplay = ""(none)""
+            end if
+        end if
+        passColor = theme.colors.success
+        if r.password.len == 0 then
+            passColor = theme.colors.secondary
+        end if
+
+        // Native password display
+        nativeDisplay = """"
+        nativeColor   = theme.colors.secondary
+        if r.hasIndex(""native_pass"") and r.native_pass.len > 0 then
+            nativeDisplay = r.native_pass
+            nativeColor   = theme.colors.warning
+        end if
+
+        // Source tag and colour
+        src = ""native""
+        if r.hasIndex(""source"") then
+            src = r.source
+        end if
+        tagColor = theme.colors.secondary
+        tagText  = src
+        if src == ""native""            then
+            tagColor = theme.colors.success  ; tagText = ""[native]""
+        end if
+        if src == ""exploit_generated"" then
+            tagColor = theme.colors.error    ; tagText = ""[exploit]""
+        end if
+        if src == ""hardened""          then
+            tagColor = theme.colors.warning  ; tagText = ""[hardened]""
+        end if
+        if src == ""harvest_updated""   then
+            tagColor = theme.colors.warning  ; tagText = ""[updated]""
+        end if
+        if src == ""sniffer""           then
+            tagColor = theme.colors.info     ; tagText = ""[sniffed]""
+        end if
+        if src == ""mail""              then
+            tagColor = theme.colors.info     ; tagText = ""[mail]""
+        end if
+
+        row = {}
+        row.id = {}
+        row.id.text = r.id
+        row.id.color = theme.colors.warning
+        row.type = {}
+        row.type.text = r.type
+        row.type.color = theme.colors.info
+        row.username = {}
+        row.username.text = r.username
+        row.username.color = theme.colors.highlight
+        row.password = {}
+        row.password.text = passDisplay
+        row.password.color = passColor
+        row.native = {}
+        row.native.text = nativeDisplay
+        row.native.color = nativeColor
+        row.tag = {}
+        row.tag.text = tagText
+        row.tag.color = tagColor
+        row.ip = {}
+        row.ip.text = r.public_ip
+        row.ip.color = theme.colors.secondary
+        row.lan = {}
+        lanDisplay = """"
+        if r.hasIndex(""lan_ip"") then
+            lanDisplay = r.lan_ip
+        end if
+        row.lan.text = lanDisplay
+        row.lan.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+CorvidUi.targets = function(records)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""id"", ""public_ip"", ""lan_ip"", ""status"", ""privilege"", ""ports""]
+    rows  = []
+    for r in records
+        statusColor = theme.colors.secondary
+        if r.status == TARGET_STATUS.OWNED     then
+            statusColor = theme.colors.success
+        end if
+        if r.status == TARGET_STATUS.EXPLOITED then
+            statusColor = theme.colors.warning
+        end if
+        if r.status == TARGET_STATUS.SCANNED   then
+            statusColor = theme.colors.info
+        end if
+        if r.status == TARGET_STATUS.BOUNCE    then
+            statusColor = theme.colors.highlight
+        end if
+
+        portList = []
+        for p in r.ports
+            portList.push(str(p.port))
+        end for
+
+        row = {}
+        row.id = {}
+        row.id.text = r.id
+        row.id.color = theme.colors.warning
+        row.public_ip = {}
+        row.public_ip.text = r.public_ip
+        row.public_ip.color = theme.colors.info
+        row.lan_ip = {}
+        row.lan_ip.text = r.lan_ip
+        row.lan_ip.color = theme.colors.secondary
+        row.status = {}
+        row.status.text = r.status
+        row.status.color = statusColor
+        row.privilege = {}
+        row.privilege.text = r.privilege
+        row.privilege.color = theme.colors.success
+        row.ports = {}
+        row.ports.text = portList.join("", "")
+        row.ports.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+CorvidUi.exploitResults = function(results)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""id"", ""type"", ""privilege"", ""address"", ""exploit""]
+    rows  = []
+    i     = 0
+    for r in results
+        typeColor = theme.colors.secondary
+        if r.rtype == ""shell"" and r.privilege == ""root"" then
+            typeColor = theme.colors.success
+        else if r.rtype == ""shell"" then
+            typeColor = theme.colors.warning
+        else if r.rtype == ""computer"" then
+            typeColor = theme.colors.info
+        else if r.rtype == ""file"" then
+            typeColor = theme.colors.highlight
+        end if
+        row = {}
+        row.id = {}
+        row.id.text = str(i)
+        row.id.color = theme.colors.warning
+        row.type = {}
+        row.type.text = r.rtype
+        row.type.color = typeColor
+        row.privilege = {}
+        row.privilege.text = r.privilege
+        row.privilege.color = typeColor
+        row.address = {}
+        row.address.text = r.address
+        row.address.color = theme.colors.secondary
+        row.exploit = {}
+        row.exploit.text = r.exploit
+        row.exploit.color = theme.colors.secondary
+        rows.push(row)
+        i = i + 1
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Command history ----
+
+CorvidUi.history = function(commands)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""id"", ""command"", ""args""]
+    rows  = []
+    i     = 0
+    for cmd in commands
+        row = {}
+        row.id = {}
+        row.id.text = str(i)
+        row.id.color = theme.colors.warning
+        row.command = {}
+        cmdEntry = cmd[0]
+        row.command.text = cmdEntry.name
+        row.command.color = theme.colors.info
+        row.args = {}
+        row.args.text = cmd[1]
+        row.args.color = theme.colors.secondary
+        rows.push(row)
+        i = i + 1
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Help display ----
+
+CorvidUi.help = function(commands)
+    theme = self.mediator.getExtension(""themeManager"")
+    keys  = [""command"", ""args"", ""description""]
+    rows  = []
+    for cmd in commands
+        paramStr = """"
+        for param in cmd.parameters
+            if param.type == ""flag"" then
+                paramStr = paramStr + ""("" + param.flag + "") ""
+            else if param.required then
+                paramStr = paramStr + ""["" + param.name + ""] ""
+            else
+                paramStr = paramStr + ""("" + param.name + "") ""
+            end if
+        end for
+        nameColor = theme.colors.error
+        if cmd.hasPermissions then
+            nameColor = theme.colors.success
+        end if
+        row = {}
+        cmdName = cmd.name
+        row.command = {}
+        row.command.text = cmdName
+        row.command.color = nameColor
+        trimmedArgs = paramStr.trim
+        row.args = {}
+        row.args.text = trimmedArgs
+        row.args.color = theme.colors.info
+        row.description = {}
+        row.description.text = cmd.description
+        row.description.color = theme.colors.secondary
+        rows.push(row)
+    end for
+    self.table(keys, rows)
+end function
+
+// ---- Whois display ----
+
+CorvidUi.whois = function(whoisData)
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""DOMAIN  : "") + theme.success(whoisData.domain))
+    print(theme.highlight(""ADMIN   : "") + theme.text(whoisData.adminName))
+    print(theme.highlight(""EMAIL   : "") + theme.info(whoisData.adminEmail))
+    if whoisData.hasIndex(""phone"") and whoisData.phone.len > 0 then
+        print(theme.highlight(""PHONE   : "") + theme.text(whoisData.phone))
+    end if
+    self.separator()
+end function
+
+// ---- DB stats display ----
+
+CorvidUi.dbStats = function(stats)
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""DATABASE SUMMARY""))
+    print(theme.info(""  Persons     : "") + theme.success(str(stats.persons)))
+    print(theme.info(""  Orgs        : "") + theme.success(str(stats.orgs)))
+    print(theme.info(""  Credentials : "") + theme.success(str(stats.credentials)))
+    print(theme.info(""  Targets     : "") + theme.success(str(stats.targets)))
+    snifferCount = 0
+    if stats.hasIndex(""sniffer"") then
+        snifferCount = stats.sniffer
+    end if
+    print(theme.info(""  Sniffer     : "") + theme.success(str(snifferCount) + "" staged captures""))
+    self.separator()
+end function
+
+// ---- Init display ----
+
+CorvidUi.init = function()
+    self.showBanner()
+    libManager = self.mediator.getExtension(""libManager"")
+    dbManager  = self.mediator.getExtension(""databaseManager"")
+    theme      = self.mediator.getExtension(""themeManager"")
+
+    // Library status
+    meta = libManager.getCurrentLib(LIB_TYPES.METAXPLOIT)
+    if meta != null then
+        print(theme.success(""[+] metaxploit.so loaded""))
+    else
+        print(theme.warning(""[!] metaxploit.so not found""))
+    end if
+
+    crypto = libManager.getCurrentLib(LIB_TYPES.CRYPTO)
+    if crypto != null then
+        print(theme.success(""[+] crypto.so loaded""))
+    else
+        print(theme.warning(""[!] crypto.so not found""))
+    end if
+
+    // DB stats
+    print()
+    stats = dbManager.stats()
+    self.dbStats(stats)
+    print()
+end function
+
+
+// ---- Menu system ----
+
+CorvidUi.lastMenuOption = 0
+
+CorvidUi.menuHeader = function()
+    theme      = self.mediator.getExtension(""themeManager"")
+    dbManager  = self.mediator.getExtension(""databaseManager"")
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+
+    stats   = dbManager.stats()
+    session = sessionManager.currentSession
+    handler = session.handler
+    ip      = session.data.ip
+
+    self.separator()
+    print(theme.highlight(""  (oVo)  CORVID""))
+    self.separator()
+    print(theme.info(""  Session : "") + theme.success(handler.user + ""@"" + handler.name() + ""  ["" + ip.public + ""]  "" + handler.privilege()))
+    print(theme.info(""  DB      : "") + theme.secondary(str(stats.targets) + "" targets  "" + str(stats.credentials) + "" creds  "" + str(stats.persons) + "" persons  "" + str(stats.orgs) + "" orgs""))
+    self.separator()
+    print()
+end function
+
+CorvidUi.menuOption = function(n, label, desc)
+    theme = self.mediator.getExtension(""themeManager"")
+    numStr = ""  "" + str(n) + "".  ""
+    isLast = n == self.lastMenuOption
+    if isLast then
+        print(theme.highlight(numStr + label) + theme.secondary(""  "" + desc + "" <""))
+    else
+        print(theme.secondary(numStr) + theme.text(label) + theme.secondary(""  "" + desc))
+    end if
+end function
+
+CorvidUi.showMenu = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    self.menuHeader()
+    self.menuOption(1,  ""Attack"",    ""guided recon and exploit workflow"")
+    self.menuOption(2,  ""Sessions"",  ""view and switch active sessions"")
+    self.menuOption(3,  ""Database"",  ""persons, orgs, credentials, targets, sync"")
+    self.menuOption(4,  ""Bounce"",    ""manage bounce chain"")
+    self.menuOption(5,  ""Intel"",     ""harvest, whois, getpass"")
+    self.menuOption(6,  ""Flock"",     ""flock connections"")
+    self.menuOption(7,  ""Roost"",     ""roost node management"")
+    self.menuOption(8,  ""Platform"",  ""attack platform deployment"")
+    self.menuOption(9,  ""Macros"",    ""run and list macros"")
+    self.menuOption(10, ""Config"",    ""theme, aliases, settings"")
+    print(theme.secondary(""  Type a number, any command, or 0/menu to return here.""))
+    print()
+end function
+
+CorvidUi.showDatabaseMenu = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""  DATABASE""))
+    self.separator()
+    print(theme.secondary(""  1.  "") + theme.text(""Persons""))
+    print(theme.secondary(""  2.  "") + theme.text(""Organisations""))
+    print(theme.secondary(""  3.  "") + theme.text(""Credentials""))
+    print(theme.secondary(""  4.  "") + theme.text(""Targets""))
+    print(theme.secondary(""  5.  "") + theme.text(""Stats""))
+    print(theme.secondary(""  6.  "") + theme.text(""Save databases""))
+    print(theme.secondary(""  7.  "") + theme.text(""Sync push   "") + theme.secondary(""send local DB to another server""))
+    print(theme.secondary(""  8.  "") + theme.text(""Sync pull   "") + theme.secondary(""fetch DB from another server""))
+    print(theme.secondary(""  9.  "") + theme.text(""Merge       "") + theme.secondary(""merge incoming/ files into live DB""))
+    print(theme.secondary(""  0.  "") + theme.text(""Back""))
+    print()
+end function
+
+CorvidUi.showBounceMenu = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""  BOUNCE NETWORK""))
+    self.separator()
+    print(theme.secondary(""  1.  "") + theme.text(""Map         "") + theme.secondary(""show bounce network""))
+    print(theme.secondary(""  2.  "") + theme.text(""Update      "") + theme.secondary(""auto-populate from owned targets, clean dead""))
+    print(theme.secondary(""  3.  "") + theme.text(""Verify      "") + theme.secondary(""health check all bounces""))
+    print(theme.secondary(""  4.  "") + theme.text(""Chain       "") + theme.secondary(""random 5-hop chain (chain max for all)""))
+    print(theme.secondary(""  5.  "") + theme.text(""Harden      "") + theme.secondary(""upgrade ssh, change passwords, chmod""))
+    print(theme.secondary(""  6.  "") + theme.text(""Wipe        "") + theme.secondary(""wipe logs on all bounces""))
+    print(theme.secondary(""  7.  "") + theme.text(""Remove      "") + theme.secondary(""remove a single bounce by IP""))
+    print(theme.secondary(""  8.  "") + theme.text(""Add manual  "") + theme.secondary(""manually add a bounce point""))
+    print(theme.secondary(""  9.  "") + theme.text(""Reset IP    "") + theme.secondary(""clear removed marker to re-add a bounce""))
+    print(theme.secondary(""  10. "") + theme.text(""Revive      "") + theme.secondary(""re-test dead bounces and ssh_default targets""))
+    print(theme.secondary(""  11. "") + theme.text(""Restore     "") + theme.secondary(""rebuild last chain after interrupted session""))
+    print(theme.secondary(""  0.  "") + theme.text(""Back""))
+    print()
+end function
+
+CorvidUi.showFlockMenu = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""  FLOCK""))
+    self.separator()
+    print(theme.secondary(""  1.  "") + theme.text(""Build       "") + theme.secondary(""compile flock client binary (bakes in Nest IP)""))
+    print(theme.secondary(""  2.  "") + theme.text(""Status      "") + theme.secondary(""check port forwarding and binary status""))
+    print(theme.secondary(""  3.  "") + theme.text(""Deploy      "") + theme.secondary(""deploy client to current session (Funny Game)""))
+    print(theme.secondary(""  4.  "") + theme.text(""List        "") + theme.secondary(""show active flock connections""))
+    print(theme.secondary(""  5.  "") + theme.text(""Adopt       "") + theme.secondary(""adopt a connection as Corvid session""))
+    print(theme.secondary(""  0.  "") + theme.text(""Back""))
+    print()
+end function
+
+CorvidUi.showIntelMenu = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""  INTEL""))
+    self.separator()
+    print(theme.secondary(""  1.  "") + theme.text(""Harvest      "") + theme.secondary(""full harvest on current target""))
+    print(theme.secondary(""  2.  "") + theme.text(""Whois        "") + theme.secondary(""lookup domain info""))
+    print(theme.secondary(""  3.  "") + theme.text(""Getpass      "") + theme.secondary(""crack passwords from passwd file""))
+    print(theme.secondary(""  4.  "") + theme.text(""ScanLan      "") + theme.secondary(""upload and run ScanLan on target""))
+    print(theme.secondary(""  5.  "") + theme.text(""SMTP grab    "") + theme.secondary(""enumerate SMTP users on current or specified IP""))
+    print(theme.secondary(""  6.  "") + theme.text(""Sniffer >    "") + theme.secondary(""sniffer deploy, collect, list, promote, clean""))
+    print(theme.secondary(""  0.  "") + theme.text(""Back""))
+    print()
+end function
+
+CorvidUi.showSnifferMenu = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""  SNIFFER""))
+    self.separator()
+    print(theme.secondary(""  1.  "") + theme.text(""Deploy       "") + theme.secondary(""deploy call-home sniffer to current session""))
+    print(theme.secondary(""  2.  "") + theme.text(""Collect      "") + theme.secondary(""pull captures from a specific host""))
+    print(theme.secondary(""  3.  "") + theme.text(""Coll. roosts "") + theme.secondary(""pull captures from all active roost nodes""))
+    print(theme.secondary(""  4.  "") + theme.text(""List         "") + theme.secondary(""show all staged sniffer captures""))
+    print(theme.secondary(""  5.  "") + theme.text(""Promote      "") + theme.secondary(""push captures into credential DB""))
+    print(theme.secondary(""  6.  "") + theme.text(""Clean        "") + theme.secondary(""remove sniffer files from current session""))
+    print(theme.secondary(""  0.  "") + theme.text(""Back""))
+    print()
+end function
+
+CorvidUi.showRoostMenu = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""  ROOST""))
+    self.separator()
+    print(theme.secondary(""  1.  "") + theme.text(""Convert     "") + theme.secondary(""convert active flock to persistent roost node""))
+    print(theme.secondary(""  2.  "") + theme.text(""List        "") + theme.secondary(""show all roost nodes""))
+    print(theme.secondary(""  3.  "") + theme.text(""Pick        "") + theme.secondary(""adopt least-recently-used node as session""))
+    print(theme.secondary(""  4.  "") + theme.text(""Verify      "") + theme.secondary(""health check all nodes""))
+    print(theme.secondary(""  5.  "") + theme.text(""Nuke        "") + theme.secondary(""kill process, clean files, retire node""))
+    print(theme.secondary(""  6.  "") + theme.text(""Sweep       "") + theme.secondary(""check dead nodes for reconnection""))
+    print(theme.secondary(""  7.  "") + theme.text(""Clean       "") + theme.secondary(""remove permanently dead nodes""))
+    print(theme.secondary(""  0.  "") + theme.text(""Back""))
+    print()
+end function
+
+CorvidUi.showPlatformMenu = function()
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""  ATTACK PLATFORM""))
+    self.separator()
+    print(theme.secondary(""  1.  "") + theme.text(""Build       "") + theme.secondary(""compile node-attacker and node-router binaries on Nest""))
+    print(theme.secondary(""  2.  "") + theme.text(""Deploy      "") + theme.secondary(""upload agent to roost node with target job""))
+    print(theme.secondary(""  3.  "") + theme.text(""Run         "") + theme.secondary(""launch agent on roost node""))
+    print(theme.secondary(""  4.  "") + theme.text(""Collect     "") + theme.secondary(""import results into Corvid DB""))
+    print(theme.secondary(""  5.  "") + theme.text(""Clean       "") + theme.secondary(""delete agent files from node""))
+    print(theme.secondary(""  6.  "") + theme.text(""Sniffer     "") + theme.secondary(""run sniffer on roost node network""))
+    print(theme.secondary(""  7.  "") + theme.text(""Collect S   "") + theme.secondary(""collect sniffer results from node""))
+    print(theme.secondary(""  0.  "") + theme.text(""Back""))
+    print()
+end function
+
+CorvidUi.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+CorvidUi.New = function()
+    if CorvidUi.singleton != null then
+        return CorvidUi.singleton
+    end if
+    instance = new CorvidUi
+    CorvidUi.singleton = instance
+    return instance
+end function
+
+CorvidUi.showSettingsMenu = function(configManager)
+    theme = self.mediator.getExtension(""themeManager"")
+    self.separator()
+    print(theme.highlight(""  CORVID SETTINGS""))
+    self.separator()
+
+    // Read current values
+    autoShiny  = configManager.get(""autoShiny"")
+    autoWhois  = configManager.get(""autoWhois"")
+    autoSmtp   = configManager.get(""autoSmtp"")
+    autoOwn    = configManager.get(""autoOwn"")
+    kbFallback = configManager.get(""kbFallback"")
+    if autoShiny isa Error then
+        autoShiny = ""1""
+    end if
+    if autoWhois isa Error then
+        autoWhois = ""1""
+    end if
+    if autoSmtp isa Error then
+        autoSmtp = ""1""
+    end if
+    if autoOwn isa Error then
+        autoOwn = ""1""
+    end if
+    if kbFallback isa Error then
+        kbFallback = ""1""
+    end if
+
+    onStr  = theme.success(""ON "")
+    offStr = theme.warning(""OFF"")
+
+    self.separator()
+    print(theme.highlight(""  AUTOMATION TOGGLES""))
+    self.separator()
+
+    s1 = onStr
+    if autoShiny != ""1"" then
+        s1 = offStr
+    end if
+    s2 = onStr
+    if autoWhois != ""1"" then
+        s2 = offStr
+    end if
+    s3 = onStr
+    if autoSmtp != ""1"" then
+        s3 = offStr
+    end if
+    s4 = onStr
+    if autoOwn != ""1"" then
+        s4 = offStr
+    end if
+    s5 = onStr
+    if kbFallback != ""1"" then
+        s5 = offStr
+    end if
+
+    print(""  [1]  "" + s1 + ""  "" + theme.text(""autoShiny  "") + theme.secondary(""score libs during port scan + baseline Nest scan on first run""))
+    print(""  [2]  "" + s2 + ""  "" + theme.text(""autoWhois  "") + theme.secondary(""whois lookup during guided attack Phase 1""))
+    print(""  [3]  "" + s3 + ""  "" + theme.text(""autoSmtp   "") + theme.secondary(""SMTP user enumeration when smtp port detected during attack""))
+    print(""  [4]  "" + s4 + ""  "" + theme.text(""autoOwn    "") + theme.secondary(""prompt to mark target as owned at end of attack""))
+    print(""  [5]  "" + s5 + ""  "" + theme.text(""kbFallback "") + theme.secondary(""run full port scan when no KB hits found""))
+    self.separator()
+    print(theme.highlight(""  OTHER""))
+    self.separator()
+    print(""  [6]  "" + theme.text(""Aliases     "") + theme.secondary(""view and manage command shortcuts""))
+    print(""  [7]  "" + theme.text(""Theme       "") + theme.secondary(""customise colours  (theme <slot> <hex>)""))
+    self.separator()
+    print(theme.secondary(""  Select a toggle to flip it, 6-7 for other settings, 0 to go back.""))
+    print()
+end function
+",1)
+m("/Corvid/asriN/commands_1.txt","// ============================================================
+// CORVID | commands
+// All command registrations. Called once from main after
+// all managers are wired to the mediator.
+// ============================================================
+
+registerAllCommands = function(mediator, commandManager)
+
+// ============================================================
+// NAVIGATION
+// ============================================================
+
+// --- ls ---
+_cmd = new Command
+_cmd.name = ""ls""
+_cmd.description = ""List files in current or given directory""
+_cmd.parameters = [StringParameter.New({""name"": ""path"", ""required"": false, ""default"": "".""})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension(""corvidUi"")
+        sessionManager = mediator.getExtension(""sessionManager"")
+        handler        = sessionManager.currentSession.handler
+        file           = handler.getFile(params.path)
+        if file isa Error then
+            return file
+        end if
+        kids = file.children()
+        if kids isa Error then
+            return kids
+        end if
+        ui.ls(kids)
+    end function
+commandManager.register(_cmd)
+
+// --- cd ---
+_cmd = new Command
+_cmd.name = ""cd""
+_cmd.description = ""Change directory""
+_cmd.parameters = [StringParameter.New({""name"": ""path"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        handler        = sessionManager.currentSession.handler
+        return handler.goTo(params.path)
+    end function
+commandManager.register(_cmd)
+
+// --- pwd ---
+_cmd = new Command
+_cmd.name = ""pwd""
+_cmd.description = ""Print working directory""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        return sessionManager.currentSession.handler.path()
+    end function
+commandManager.register(_cmd)
+
+// --- back ---
+_cmd = new Command
+_cmd.name = ""back""
+_cmd.description = ""Return to previous session""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        result = sessionManager.back()
+        if result isa Error then
+            return result
+        end if
+        ui.info(""Returned to: "" + sessionManager.currentSession.label)
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// FILE OPERATIONS
+// ============================================================
+
+// --- cat ---
+_cmd = new Command
+_cmd.name = ""cat""
+_cmd.description = ""Print file contents""
+_cmd.parameters = [StringParameter.New({""name"": ""path"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        handler        = sessionManager.currentSession.handler
+        file           = handler.getFile(params.path)
+        if file isa Error then
+            return file
+        end if
+        return file.content()
+    end function
+commandManager.register(_cmd)
+
+// --- write ---
+_cmd = new Command
+_cmd.name = ""write""
+_cmd.description = ""Write content to a file. Use > to overwrite, >> to append""
+_cmd.parameters = [StringParameter.New({""name"": ""path"",    ""required"": true}),OptionsParameter.New({""name"": ""mode"", ""required"": true, ""options"": {"">"": "">"", "">>"": "">>""}}),RestParameter.New({""name"": ""content"", ""required"": false, ""default"": """"})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        handler        = sessionManager.currentSession.handler
+        file           = handler.getFile(params.path)
+        if file isa Error then
+            return file
+        end if
+        if params.mode == "">"" then
+            return file.setContent(params.content)
+        end if
+        return file.appendContent(params.content)
+    end function
+commandManager.register(_cmd)
+
+// --- rm ---
+_cmd = new Command
+_cmd.name = ""rm""
+_cmd.description = ""Delete a file or directory""
+_cmd.parameters = [StringParameter.New({""name"": ""path"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.delete(params.path)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Deleted: "" + params.path)
+    end function
+commandManager.register(_cmd)
+
+// --- mkdir ---
+_cmd = new Command
+_cmd.name = ""mkdir""
+_cmd.description = ""Create a directory""
+_cmd.parameters = [StringParameter.New({""name"": ""path"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""computer""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.createFolder(params.path)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Created: "" + params.path)
+    end function
+commandManager.register(_cmd)
+
+// --- touch ---
+_cmd = new Command
+_cmd.name = ""touch""
+_cmd.description = ""Create an empty file""
+_cmd.parameters = [StringParameter.New({""name"": ""path"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""computer""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.createFile(params.path)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Created: "" + params.path)
+    end function
+commandManager.register(_cmd)
+
+// --- mv ---
+_cmd = new Command
+_cmd.name = ""mv""
+_cmd.description = ""Move or rename a file""
+_cmd.parameters = [StringParameter.New({""name"": ""src"",  ""required"": true}),StringParameter.New({""name"": ""dest"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.move(params.src, params.dest)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Moved: "" + params.src + "" -> "" + params.dest)
+    end function
+commandManager.register(_cmd)
+
+// --- cp ---
+_cmd = new Command
+_cmd.name = ""cp""
+_cmd.description = ""Copy a file""
+_cmd.parameters = [StringParameter.New({""name"": ""src"",  ""required"": true}),StringParameter.New({""name"": ""dest"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.copy(params.src, params.dest)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Copied: "" + params.src + "" -> "" + params.dest)
+    end function
+commandManager.register(_cmd)
+
+// --- chmod ---
+_cmd = new Command
+_cmd.name = ""chmod""
+_cmd.description = ""Change file permissions""
+_cmd.parameters = [FlagParameter.New({""name"": ""recursive"", ""flag"": ""-R""}),StringParameter.New({""name"": ""perms"", ""required"": true}),StringParameter.New({""name"": ""path"",  ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.setPermissions(params.path, params.perms, params.recursive)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Permissions set: "" + params.path)
+    end function
+commandManager.register(_cmd)
+
+// --- chown ---
+_cmd = new Command
+_cmd.name = ""chown""
+_cmd.description = ""Change file owner""
+_cmd.parameters = [FlagParameter.New({""name"": ""recursive"", ""flag"": ""-R""}),StringParameter.New({""name"": ""owner"", ""required"": true}),StringParameter.New({""name"": ""path"",  ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""root""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.setOwner(params.path, params.owner, params.recursive)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Owner set: "" + params.path)
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// SESSION MANAGEMENT
+// ============================================================
+
+// --- sessions ---
+_cmd = new Command
+_cmd.name = ""sessions""
+_cmd.description = ""List all open sessions""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        ui.sessions(sessionManager.listSessions())
+    end function
+commandManager.register(_cmd)
+
+// --- use ---
+_cmd = new Command
+_cmd.name = ""use""
+_cmd.description = ""Switch to a session by index""
+_cmd.parameters = [StringParameter.New({""name"": ""id"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        result         = sessionManager.setCurrentSession(params.id.val)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Switched to session: "" + str(params.id.val))
+    end function
+commandManager.register(_cmd)
+
+// --- pivot ---
+_cmd = new Command
+_cmd.name = ""pivot""
+_cmd.description = ""Set pivot session by index""
+_cmd.parameters = [StringParameter.New({""name"": ""id"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        result         = sessionManager.setPivotSession(params.id.val)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Pivot set to session: "" + str(params.id.val))
+    end function
+commandManager.register(_cmd)
+
+// --- activate ---
+_cmd = new Command
+_cmd.name = ""activate""
+_cmd.description = ""Open an interactive terminal on the current session""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""shell""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        dbManager      = mediator.getExtension(""databaseManager"")
+        handler        = sessionManager.currentSession.handler
+        if not (handler isa ShellSession) then
+            return Error.New(""activate requires a shell session"", ""NOT_SHELL"")
+        end if
+        handler.activate()
+        // After returning from native terminal, check session is still alive
+        // A reboot during activate will kill the shell - fall back gracefully
+        rawShell = handler.shell.shell
+        sessionDead = false
+        if rawShell == null then
+            sessionDead = true
+        else
+            testComp = rawShell.host_computer
+            if testComp == null then
+                sessionDead = true
+            end if
+        end if
+        if sessionDead then
+            ui.warning(""Session lost after activate (machine may have rebooted) - falling back"")
+            sessionManager.back()
+            dbManager.save()
+        end if
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// SYSTEM
+// ============================================================
+
+// --- ps ---
+_cmd = new Command
+_cmd.name = ""ps""
+_cmd.description = ""List running processes""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""computer""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        procs          = handler.showProcs()
+        if procs isa Error then
+            return procs
+        end if
+        ui.processes(procs)
+    end function
+commandManager.register(_cmd)
+
+// --- kill ---
+_cmd = new Command
+_cmd.name = ""kill""
+_cmd.description = ""Terminate a process by PID""
+_cmd.parameters = [StringParameter.New({""name"": ""pid"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""computer""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        pid            = params.pid.trim.val
+        if pid <= 0 then
+            return Error.New(""Invalid PID: "" + params.pid, ""INVALID_PID"")
+        end if
+        result = handler.closeProcess(pid)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Process terminated: "" + str(pid))
+    end function
+commandManager.register(_cmd)
+
+// --- adduser ---
+_cmd = new Command
+_cmd.name = ""adduser""
+_cmd.description = ""Create a new user on the current machine""
+_cmd.parameters = [StringParameter.New({""name"": ""username"", ""required"": true}),StringParameter.New({""name"": ""password"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""computer""
+_cmd.permissions.privilege = ""root""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.addUser(params.username, params.password)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""User created: "" + params.username)
+    end function
+commandManager.register(_cmd)
+
+// --- deluser ---
+_cmd = new Command
+_cmd.name = ""deluser""
+_cmd.description = ""Delete a user from the current machine""
+_cmd.parameters = [StringParameter.New({""name"": ""username"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""computer""
+_cmd.permissions.privilege = ""root""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.deleteUser(params.username)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""User deleted: "" + params.username)
+    end function
+commandManager.register(_cmd)
+
+// --- passwd ---
+_cmd = new Command
+_cmd.name = ""passwd""
+_cmd.description = ""Change a user's password""
+_cmd.parameters = [StringParameter.New({""name"": ""username"", ""required"": true}),StringParameter.New({""name"": ""password"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""computer""
+_cmd.permissions.privilege = ""root""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        result         = handler.changePassword(params.username, params.password)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Password changed for: "" + params.username)
+    end function
+commandManager.register(_cmd)
+
+// --- corruptlogs ---
+_cmd = new Command
+_cmd.name = ""corruptlogs""
+_cmd.description = ""Wipe system.log, trigger a benign regen entry, then open LogViewer to manually clear it.""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""shell""
+_cmd.permissions.privilege = ""root""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        rawShell       = handler.shell.shell
+        rawComp        = rawShell.host_computer
+
+        // Step 1: wipe system.log with move trick
+        result = handler.corruptLogs()
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Log wiped."")
+
+        // Step 2: touch and delete a temp file to regenerate system.log
+        // with a single benign entry before we open LogViewer
+        rawComp.touch(""/var"", ""corvid_tmp"")
+        tmpFile = rawComp.File(""/var/corvid_tmp"")
+        if tmpFile != null then
+            tmpFile.delete()
+        end if
+        ui.info(""Log regenerated with single entry."")
+
+        // Step 3: launch LogViewer so user can manually clear the last entry
+        ui.info(""Opening LogViewer — delete the remaining entry, then save."")
+        logViewerPath = ""/usr/bin/LogViewer.exe""
+        lvFile = rawComp.File(logViewerPath)
+        if lvFile == null then
+            logViewerPath = ""/bin/LogViewer.exe""
+            lvFile = rawComp.File(logViewerPath)
+        end if
+        if lvFile == null then
+            ui.warning(""LogViewer.exe not found — clear the remaining log entry manually."")
+        else
+            rawShell.launch(logViewerPath)
+        end if
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// NETWORK
+// ============================================================
+
+// --- nmap ---
+_cmd = new Command
+_cmd.name = ""nmap""
+_cmd.description = ""Scan a target IP and display ports""
+_cmd.parameters = [StringParameter.New({""name"": ""ip"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui        = mediator.getExtension(""corvidUi"")
+        dbManager = mediator.getExtension(""databaseManager"")
+        ip        = params.ip
+
+        if not is_valid_ip(ip) then
+            return Error.New(""Invalid IP address: "" + ip, ""INVALID_IP"")
+        end if
+
+        // Detect private/LAN IP ranges - get_router() always uses Nest context
+        // so nmapping a LAN IP from a remote session returns Nest data, not target data
+        isPrivate = false
+        if ip.indexOf(""192.168."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""10."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.16."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.17."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.18."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.19."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.20."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.21."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.22."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.23."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.24."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.25."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.26."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.27."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.28."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.29."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.30."") == 0 then
+            isPrivate = true
+        end if
+        if ip.indexOf(""172.31."") == 0 then
+            isPrivate = true
+        end if
+
+        if isPrivate then
+            ui.warning(""Cannot nmap LAN IP "" + ip + "" directly - nmap always runs from your Nest context"")
+            ui.info(""To scan LAN machines, use: attack <public_ip> <lan_ip>"")
+            ui.info(""Or use portattack <public_ip> <port> <lan_ip> from inside the network"")
+            ui.print("""")
+            // Show any cached data from DB for this LAN IP
+            cached = dbManager.findTarget(ip)
+            if cached.len > 0 then
+                ui.highlight(""CACHED DATA FOR "" + ip)
+                ui.separator()
+                for tgt in cached
+                    if tgt.hasIndex(""ports"") and tgt.ports.len > 0 then
+                        ui.info(""  Source public IP: "" + tgt.public_ip)
+                        for pr in tgt.ports
+                            fwdStr = ""0""
+                            if pr.forwarded then
+                                fwdStr = ""1""
+                            end if
+                            ui.print(""  port "" + str(pr.port) + ""  "" + pr.service + ""  "" + pr.version + ""  forwarded:"" + fwdStr)
+                        end for
+                    end if
+                end for
+                ui.separator()
+            else
+                ui.dim(""No cached data for "" + ip + "" in DB"")
+            end if
+            return
+        end if
+
+        router = Router.New(ip)
+        if router isa Error then
+            router = Router.Local()
+            if router isa Error then
+                return router
+            end if
+        end if
+
+        ui.info(""Router: "" + router.publicIp() + "" | "" + router.localIp() + "" | kernel "" + router.kernelVersion())
+        rules = router.firewallRules()
+        if rules.len > 0 then
+            ui.warning(""Firewall rules: "" + rules.join("", ""))
+        else
+            ui.success(""No firewall rules"")
+        end if
+        print()
+
+        devices = router.devices()
+        if devices isa Error then
+            return devices
+        end if
+
+        // Display each device and its ports as a table
+        for kv in devices
+            deviceIp = kv.key
+            ports    = kv.value
+            ui.info(""Device: "" + deviceIp)
+
+            rows = []
+            keys = [""port"", ""service"", ""version"", ""forwarded"", ""open""]
+            for port in ports
+                fwdColor = ""#555555""
+                if port.forwarded then
+                    fwdColor = ""#00ff00""
+                end if
+                openColor = ""#555555""
+                if port.open then
+                    openColor = ""#00ff00""
+                end if
+                row = {}
+                row.port = {}
+                row.port.text = str(port.port)
+                row.port.color = ""#FFFC33""
+                row.service = {}
+                row.service.text = port.service
+                row.service.color = ""#058FAB""
+                row.version = {}
+                row.version.text = port.version
+                row.version.color = ""#555555""
+                row.forwarded = {}
+                row.forwarded.text = str(port.forwarded)
+                row.forwarded.color = fwdColor
+                row.open = {}
+                row.open.text = str(port.open)
+                row.open.color = openColor
+                rows.push(row)
+
+                // Auto-feed target database
+                targetData = {}
+                targetData.public_ip = ip
+                targetData.lan_ip    = deviceIp
+                targetData.router_ip = router.publicIp()
+                portRecord = {}
+                portRecord.port      = port.port
+                portRecord.service   = port.service
+                portRecord.version   = port.version
+                portRecord.forwarded = port.forwarded
+                portRecord.exploited = false
+                targetData.ports = [portRecord]
+                // Flag machines with native SSH for bounce revival sweep
+                if port.service == ""ssh"" then
+                    targetData.ssh_default = true
+                end if
+                dbManager.upsertTarget(targetData)
+            end for
+            ui.table(keys, rows)
+        end for
+        dbManager.save()
+    end function
+commandManager.register(_cmd)
+
+// --- whois ---
+_cmd = new Command
+_cmd.name = ""whois""
+_cmd.description = ""Run whois on an IP and save results to intel database. Omit IP to whois current session.""
+_cmd.parameters = [StringParameter.New({""name"": ""ip"", ""required"": false, ""default"": """"})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension(""corvidUi"")
+        intelManager   = mediator.getExtension(""intelManager"")
+        sessionManager = mediator.getExtension(""sessionManager"")
+
+        targetIp = params.ip.trim
+        if targetIp.len == 0 then
+            targetIp = sessionManager.currentSession.data.ip.public
+            ui.info(""Whois on current session: "" + targetIp)
+        end if
+
+        if not is_valid_ip(targetIp) then
+            return Error.New(""Invalid IP: "" + targetIp, ""INVALID_IP"")
+        end if
+
+        result = intelManager.harvestWhois(targetIp)
+        if result isa Error then
+            return result
+        end if
+        ui.whois(result)
+    end function
+commandManager.register(_cmd)
+
+// --- ssh ---
+_cmd = new Command
+_cmd.name = ""ssh""
+_cmd.description = ""Connect to a remote machine via SSH""
+_cmd.parameters = [StringParameter.New({""name"": ""ip"",       ""required"": true}),StringParameter.New({""name"": ""username"",  ""required"": true}),StringParameter.New({""name"": ""password"",  ""required"": true}),StringParameter.New({""name"": ""port"",     ""required"": false, ""default"": ""22""})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""shell""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        handler        = sessionManager.currentSession.handler
+        newSession     = handler.connectTo(params.ip, params.port.val, params.username, params.password, ""ssh"")
+        if newSession isa Error then
+            return newSession
+        end if
+        session = sessionManager.addSession(newSession.shell.shell, params.username + ""@"" + params.ip)
+        if session isa Error then
+            return session
+        end if
+        sessionManager.setCurrentSession(session)
+        ui.success(""Connected: "" + params.username + ""@"" + params.ip + "":"" + str(params.port.val))
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// LIBRARY MANAGEMENT
+// ============================================================
+
+// --- libs ---
+_cmd = new Command
+_cmd.name = ""libs""
+_cmd.description = ""List all loaded libraries""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        libManager = mediator.getExtension(""libManager"")
+        ui         = mediator.getExtension(""corvidUi"")
+        ui.libs(libManager.allLibs(), libManager.currentLibs, libManager.pivotLibs)
+    end function
+commandManager.register(_cmd)
+
+// --- addlib ---
+_cmd = new Command
+_cmd.name = ""addlib""
+_cmd.description = ""Load a library from the given path""
+_cmd.parameters = [StringParameter.New({""name"": ""path"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        sessionManager = mediator.getExtension(""sessionManager"")
+        libManager     = mediator.getExtension(""libManager"")
+        ui             = mediator.getExtension(""corvidUi"")
+        rawLib = include_lib(params.path)
+        if rawLib == null then
+            return Error.New(""Could not load library: "" + params.path, ""LOAD_ERROR"")
+        end if
+        ipData = {}
+        ipData.ip   = sessionManager.currentSession.data.ip
+        ipData.path = params.path
+        result = libManager.addLib(rawLib, ipData)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Library loaded: "" + params.path)
+    end function
+commandManager.register(_cmd)
+
+// --- uselib ---
+_cmd = new Command
+_cmd.name = ""uselib""
+_cmd.description = ""Set a loaded library as current by index""
+_cmd.parameters = [StringParameter.New({""name"": ""id"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        libManager = mediator.getExtension(""libManager"")
+        ui         = mediator.getExtension(""corvidUi"")
+        lib = libManager.getLibById(params.id.val)
+        if lib isa Error then
+            return lib
+        end if
+        libManager.setCurrentLib(lib)
+        ui.success(""Current lib set to: "" + lib.type + "" ["" + str(params.id.val) + ""]"")
+    end function
+commandManager.register(_cmd)
+
+// --- pivotlib ---
+_cmd = new Command
+_cmd.name = ""pivotlib""
+_cmd.description = ""Set a loaded library as pivot by index""
+_cmd.parameters = [StringParameter.New({""name"": ""id"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        libManager = mediator.getExtension(""libManager"")
+        ui         = mediator.getExtension(""corvidUi"")
+        lib = libManager.getLibById(params.id.val)
+        if lib isa Error then
+            return lib
+        end if
+        libManager.setPivotLib(lib.type, lib)
+        ui.success(""Pivot lib set to: "" + lib.type + "" ["" + str(params.id.val) + ""]"")
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// ATTACK
+// ============================================================
+
+// --- scan ---
+_cmd = new Command
+_cmd.name = ""scan""
+_cmd.description = ""Scan and test all exploits on target IP:port. Results saved to database""
+_cmd.parameters = [StringParameter.New({""name"": ""ip"",   ""required"": true}),StringParameter.New({""name"": ""port"", ""required"": true}),StringParameter.New({""name"": ""lanip"",    ""required"": false, ""default"": ""unknown""}),StringParameter.New({""name"": ""routerip"", ""required"": false, ""default"": ""unknown""})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui            = mediator.getExtension(""corvidUi"")
+        attackManager = mediator.getExtension(""attackManager"")
+
+        // Auto-whois if enabled
+        configManager = mediator.getExtension(""configManager"")
+        autoWhois     = configManager.get(""autoWhois"")
+        if not (autoWhois isa Error) and autoWhois then
+            intelManager = mediator.getExtension(""intelManager"")
+            intelManager.harvestWhois(params.ip)
+        end if
+
+        results = attackManager.runScan(params.ip, params.port.val, params.lanip, params.routerip)
+        if results isa Error then
+            return results
+        end if
+        ui.exploitResults(results)
+    end function
+commandManager.register(_cmd)
+
+// --- exploit ---
+_cmd = new Command
+_cmd.name = ""exploit""
+_cmd.description = ""Run a stored exploit by index. Omit index to auto-select best""
+_cmd.parameters = [StringParameter.New({""name"": ""ip"",   ""required"": true}),StringParameter.New({""name"": ""port"", ""required"": true}),StringParameter.New({""name"": ""lanip"",    ""required"": false, ""default"": ""unknown""}),StringParameter.New({""name"": ""routerip"", ""required"": false, ""default"": ""unknown""}),StringParameter.New({""name"": ""index"",    ""required"": false, ""default"": """"})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui            = mediator.getExtension(""corvidUi"")
+        attackManager = mediator.getExtension(""attackManager"")
+        result        = attackManager.exploit(params.ip, params.port.val, params.lanip, params.routerip, params.index)
+        if result isa Error then
+            return result
+        end if
+    end function
+commandManager.register(_cmd)
+
+// --- hack ---
+_cmd = new Command
+_cmd.name = ""hack""
+_cmd.description = ""Scan and immediately exploit best result on target IP:port""
+_cmd.parameters = [StringParameter.New({""name"": ""ip"",   ""required"": true}),StringParameter.New({""name"": ""port"", ""required"": true}),StringParameter.New({""name"": ""lanip"",    ""required"": false, ""default"": ""unknown""}),StringParameter.New({""name"": ""routerip"", ""required"": false, ""default"": ""unknown""})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui            = mediator.getExtension(""corvidUi"")
+        attackManager = mediator.getExtension(""attackManager"")
+
+        // Auto-whois if enabled
+        configManager = mediator.getExtension(""configManager"")
+        autoWhois     = configManager.get(""autoWhois"")
+        if not (autoWhois isa Error) and autoWhois then
+            intelManager = mediator.getExtension(""intelManager"")
+            intelManager.harvestWhois(params.ip)
+        end if
+
+        ui.info(""Scanning "" + params.ip + "":"" + str(params.port.val) + ""..."")
+        scanResults = attackManager.runScan(params.ip, params.port.val, params.lanip, params.routerip)
+        if scanResults isa Error then
+            return scanResults
+        end if
+        ui.exploitResults(scanResults)
+
+        ui.info(""Exploiting best result..."")
+        result = attackManager.exploit(params.ip, params.port.val, params.lanip, params.routerip, null)
+        if result isa Error then
+            return result
+        end if
+    end function
+commandManager.register(_cmd)
+
+// --- escalate ---
+_cmd = new Command
+_cmd.name = ""escalate""
+_cmd.description = ""Attempt privilege escalation on current session""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""shell""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        attackManager = mediator.getExtension(""attackManager"")
+        return attackManager.escalate()
+    end function
+commandManager.register(_cmd)
+
+// --- msfconsole ---
+_cmd = new Command
+_cmd.name = ""msfconsole""
+_cmd.description = ""Interactive exploit session  -  manually select and run exploits""
+_cmd.parameters = [StringParameter.New({""name"": ""ip"",   ""required"": true}),StringParameter.New({""name"": ""port"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension(""corvidUi"")
+        attackManager  = mediator.getExtension(""attackManager"")
+        dbManager      = mediator.getExtension(""databaseManager"")
+        metaxManager   = mediator.getExtension(""metaxploitManager"")
+        sessionManager = mediator.getExtension(""sessionManager"")
+
+        metaxploit = metaxManager.getMetaxploit()
+        if metaxploit isa Error then
+            return metaxploit
+        end if
+        session    = metaxploit.netUse(params.ip, params.port.val)
+        if session isa Error then
+            return session
+        end if
+        rawLib     = session.dump_lib()
+        if rawLib == null then
+            return Error.New(""Could not get target library"", ""DUMP_LIB_ERROR"")
+        end if
+        libKey     = rawLib.lib_name + ""_"" + rawLib.version
+
+        targets = dbManager.findTarget(params.ip)
+        if targets.len == 0 then
+            return Error.New(""No scan data for "" + params.ip + "". Run scan first."", ""NO_SCAN_DATA"")
+        end if
+
+        target  = targets[0]
+        results = dbManager.getExploits(target.id, libKey)
+        if results.len == 0 then
+            return Error.New(""No exploits for "" + libKey + "". Run scan first."", ""NO_SCAN_DATA"")
+        end if
+
+        while true
+            ui.exploitResults(results)
+            input = user_input(ui.prompt(sessionManager.currentSession) + ""msfconsole [id/exit]: "")
+            trimmedInput = input.trim
+            if trimmedInput == ""exit"" or trimmedInput == ""q"" then
+                break
+            end if
+            idx = input.val
+            if typeof(idx) == ""string"" then
+                ui.error(""Invalid selection"")
+                continue
+            end if
+            result = attackManager.exploit(params.ip, params.port.val, ""unknown"", ""unknown"", idx)
+            if result isa Error then
+                ui.error(result.message)
+            else
+                break
+            end if
+        end while
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// INTEL / HARVEST
+// ============================================================
+
+// --- fs ---
+_cmd = new Command
+_cmd.name = ""fs""
+_cmd.description = ""Browse file system of current session with permission indicators. Usage: fs [path]""
+_cmd.parameters = [StringParameter.New({""name"": ""path"", ""required"": false, ""default"": ""/""})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension(""corvidUi"")
+    sessionManager = mediator.getExtension(""sessionManager"")
+
+    session = sessionManager.currentSession
+    if session == null then
+        return Error.New(""No active session"", ""NO_SESSION"")
+    end if
+
+    handler = session.handler
+    startPath = params.path.trim
+    if startPath.len == 0 then
+        startPath = ""/""
+    end if
+
+    // Get raw computer object for file access - avoids facade get_files/get_folders issue
+    // ShellSession gives us shell.shell.host_computer for raw game API
+    rawComp = null
+    if session.handler isa ShellSession then
+        rawComp = session.handler.shell.shell.host_computer
+    end if
+    if rawComp == null then
+        return Error.New(""fs requires a shell session"", ""NOT_SHELL"")
+    end if
+
+    // Get starting file via raw computer File() method
+    startFile = rawComp.File(startPath)
+    if startFile == null then
+        return Error.New(""Cannot access path: "" + startPath, ""PATH_ERROR"")
+    end if
+
+    ui.separator()
+    ui.highlight(""FILE SYSTEM  ["" + startPath + ""]"")
+    ui.separator()
+
+    // Recursive tree printer - uses raw game file objects (.name .path as properties)
+    // maxDepth kept low to avoid hitting GreyScript execution time limit
+    maxDepth = 2
+    fsPrint = function(f, depth, prefix)
+        if depth > maxDepth then
+            return
+        end if
+        if f == null then
+            return
+        end if
+
+        // Raw game file objects: has_permission is a method
+        readable = f.has_permission(""r"")
+        writable = f.has_permission(""w"")
+        execable = f.has_permission(""x"")
+
+        r = "" "" ; w = "" "" ; x = "" ""
+        if readable then
+            r = ""r""
+        end if
+        if writable then
+            w = ""w""
+        end if
+        if execable then
+            x = ""x""
+        end if
+        permLabel = ""["" + r + w + x + ""]""
+
+        // .name and .is_folder are properties on raw game file objects
+        fname = f.name
+        if f.is_folder then
+            fname = fname + ""/""
+        end if
+
+        sizeStr = """"
+        if not f.is_folder then
+            sizeStr = ""  "" + f.size
+        end if
+
+        if readable and writable then
+            ui.success(prefix + fname + ""  "" + permLabel + sizeStr)
+        else if readable then
+            ui.info(prefix + fname + ""  "" + permLabel + sizeStr)
+        else
+            ui.dim(prefix + fname + ""  "" + permLabel + sizeStr)
+        end if
+
+        // Only recurse into readable folders
+        if f.is_folder and readable then
+            childPrefix = prefix + ""  ""
+            subFolders = f.get_folders
+            subFiles   = f.get_files
+            if subFolders != null and subFolders.len > 0 then
+                for sf in subFolders
+                    fsPrint(sf, depth + 1, childPrefix)
+                end for
+            end if
+            if subFiles != null and subFiles.len > 0 then
+                for fl in subFiles
+                    fsPrint(fl, depth + 1, childPrefix)
+                end for
+            end if
+        end if
+    end function
+
+    fsPrint(startFile, 0, ""  "")
+    ui.print("""")
+    ui.dim(""  [rwx] = read/write/execute  |  green=writable  cyan=readable  dim=no access"")
+    ui.dim(""  Depth: "" + str(maxDepth) + ""  |  Use: fs /lib  fs /home  fs /etc for specific paths"")
+    ui.separator()
+end function
+commandManager.register(_cmd)
+
+// --- harvest ---
+_cmd = new Command
+_cmd.name = ""harvest""
+_cmd.description = ""Harvest passwd, mail, bank from current session. IP optional - defaults to current session.""
+_cmd.parameters = [StringParameter.New({""name"": ""publicip"", ""required"": false, ""default"": """"}), StringParameter.New({""name"": ""lanip"", ""required"": false, ""default"": """"})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""computer""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension(""corvidUi"")
+    sessionManager = mediator.getExtension(""sessionManager"")
+    intelManager   = mediator.getExtension(""intelManager"")
+
+    publicIp = params.publicip.trim
+    lanIp    = params.lanip.trim
+
+    // Default to current session IP if not provided
+    if publicIp.len == 0 then
+        publicIp = sessionManager.currentSession.data.ip.public
+        lanIp    = sessionManager.currentSession.data.ip.local
+    end if
+
+    ui.separator()
+    ui.highlight(""HARVESTING "" + publicIp)
+    ui.separator()
+    result = intelManager.harvestAll(publicIp, lanIp)
+    if result isa Error then
+        ui.warning(""Harvest error: "" + result.message)
+        return result
+    end if
+end function
+commandManager.register(_cmd)
+
+// --- getpass ---
+_cmd = new Command
+_cmd.name = ""getpass""
+_cmd.description = ""Crack all passwords on current session and display results""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""computer""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension(""corvidUi"")
+        sessionManager = mediator.getExtension(""sessionManager"")
+        intelManager   = mediator.getExtension(""intelManager"")
+        handler        = sessionManager.currentSession.handler
+        ip             = sessionManager.currentSession.data.ip
+
+        result = intelManager.harvestPasswd(handler, ip.public, ip.local)
+        if result isa Error then
+            return result
+        end if
+
+        dbManager = mediator.getExtension(""databaseManager"")
+        creds     = dbManager.findCredentialsByIp(ip.public)
+        ui.credentials(creds)
+    end function
+commandManager.register(_cmd)
+
+// --- decipher ---
+// Crack a hash string directly without needing a session.
+// Accepts either a raw hash, a full ""username:hash"" passwd line,
+// or a file path - reads the file and deciphers each line.
+// Usage: decipher <hash>  or  decipher <username:hash>  or  decipher <filepath>
+_cmd = new Command
+_cmd.name = ""decipher""
+_cmd.description = ""Crack a password hash. Accepts hash, username:hash, or a file path to decipher all lines.""
+_cmd.parameters = [StringParameter.New({""name"": ""input"", ""required"": true, ""default"": """"})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui             = mediator.getExtension(""corvidUi"")
+        intelManager   = mediator.getExtension(""intelManager"")
+        sessionManager = mediator.getExtension(""sessionManager"")
+
+        input = params.input.trim
+        if input.len == 0 then
+            return Error.New(""Provide a hash, username:hash, or file path"", ""MISSING_PARAM"")
+        end if
+
+        // Detect file path - starts with / or ./ and exists on current session
+        lines = []
+        if input.indexOf(""/"") == 0 or input.indexOf(""./"") == 0 then
+            handler = sessionManager.currentSession.handler
+            f = handler.getFile(input)
+            if not (f isa Error) then
+                content = f.content()
+                if not (content isa Error) and content.len > 0 then
+                    for line in content.split(char(10))
+                        line = line.trim
+                        if line.len > 0 then
+                            lines.push(line)
+                        end if
+                    end for
+                end if
+            end if
+        end if
+
+        // If not a file or file empty, treat input as a single hash
+        if lines.len == 0 then
+            lines.push(input)
+        end if
+
+        ui.separator()
+        cracked = 0
+        failed  = 0
+        for line in lines
+            username = """"
+            hash = line
+            colonIdx = line.indexOf("":"")
+            atIdx = line.indexOf(""@"")
+            // ""user@domain.com:hash"" - email format, split on last colon
+            // ""username:hash"" - passwd format
+            if colonIdx != null then
+                if atIdx != null and atIdx < colonIdx then
+                    // email:hash format
+                    username = line[:colonIdx]
+                    hash = line[colonIdx + 1:]
+                else if atIdx == null then
+                    // username:hash format
+                    username = line[:colonIdx]
+                    hash = line[colonIdx + 1:]
+                end if
+            end if
+
+            if hash.len == 0 then
+                continue
+            end if
+
+            if username.len > 0 then
+                ui.info(""Deciphering: "" + username)
+            else
+                ui.info(""Deciphering hash: "" + hash[:20] + ""..."")
+            end if
+
+            result = intelManager.crackHash(username, hash)
+            if result isa Error then
+                ui.warning(""  Could not crack"")
+                failed = failed + 1
+            else
+                if username.len > 0 then
+                    ui.success(""  "" + username + "" : "" + result)
+                else
+                    ui.success(""  Password: "" + result)
+                end if
+                cracked = cracked + 1
+            end if
+        end for
+
+        if lines.len > 1 then
+            ui.print("""")
+            ui.info(""Cracked: "" + str(cracked) + ""  Failed: "" + str(failed))
+        end if
+        ui.separator()
+    end function
+commandManager.register(_cmd)
+
+// ============================================================
+// DATABASE QUERIES
+// ============================================================
+
+// --- persons ---
+_cmd = new Command
+_cmd.name = ""persons""
+_cmd.description = ""List or search persons database. Omit term to list all""
+_cmd.parameters = [StringParameter.New({""name"": ""term"", ""required"": false, ""default"": """"})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui        = mediator.getExtension(""corvidUi"")
+        dbManager = mediator.getExtension(""databaseManager"")
+        if params.term.len > 0 then
+            results = dbManager.findPerson(params.term)
+        else
+            results = dbManager.allPersons()
+        end if
+        if results.len == 0 then
+            ui.warning(""No persons found"")
+            return
+        end if
+        ui.persons(results)
+    end function
+commandManager.register(_cmd)
+
+// --- orgs ---
+_cmd = new Command
+_cmd.name = ""orgs""
+_cmd.description = ""List or search organisations database. Omit term to list all""
+_cmd.parameters = [StringParameter.New({""name"": ""term"", ""required"": false, ""default"": """"})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui        = mediator.getExtension(""corvidUi"")
+        dbManager = mediator.getExtension(""databaseManager"")
+        if params.term.len > 0 then
+            results = dbManager.findOrg(params.term)
+        else
+            results = dbManager.allOrgs()
+        end if
+        if results.len == 0 then
+            ui.warning(""No organisations found"")
+            return
+        end if
+        ui.orgs(results)
+    end function
+commandManager.register(_cmd)
+
+// --- creds ---
+_cmd = new Command
+_cmd.name = ""creds""
+_cmd.description = ""List credentials for current session. Use 'creds all' to show all, or filter by type/term.""
+_cmd.parameters = [StringParameter.New({""name"": ""term"", ""required"": false, ""default"": """"}),OptionsParameter.New({""name"": ""type"", ""required"": false, ""default"": """",""options"": {""system"": ""system"", ""mail"": ""mail"", ""bank"": ""bank"", ""all"": """"}})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension(""corvidUi"")
+    dbManager      = mediator.getExtension(""databaseManager"")
+    sessionManager = mediator.getExtension(""sessionManager"")
+
+    showAll = params.term.trim.lower == ""all"" or params.type.trim.lower == ""all""
+
+    if showAll then
+        // creds all - show everything
+        if params.type.len > 0 and params.type != ""all"" then
+            results = dbManager.findCredentialsByType(params.type)
+        else if params.term.len > 0 and params.term != ""all"" then
+            results = dbManager.findCredentials(params.term)
+        else
+            results = dbManager.allCredentials()
+        end if
+        ui.info(""All credentials ("" + str(results.len) + "" total):"")
+    else
+        // Default: filter to current session PUBLIC IP only
+        // Deliberately exclude LAN IP - LAN subnets are shared across many machines
+        // and would cause creds from other sessions to bleed in
+        sessionIp = sessionManager.currentSession.data.ip.public
+        if params.type.len > 0 then
+            allOfType = dbManager.findCredentialsByType(params.type)
+            results = []
+            for cr in allOfType
+                crIp = """"
+                if cr.hasIndex(""public_ip"") then
+                    crIp = cr.public_ip
+                end if
+                if crIp == sessionIp then
+                    results.push(cr)
+                end if
+            end for
+        else if params.term.len > 0 then
+            results = dbManager.findCredentials(params.term)
+        else
+            results = dbManager.findCredentialsByIp(sessionIp)
+        end if
+        ui.info(""Credentials for "" + sessionIp + "" (use 'creds all' for full DB):"")
+    end if
+
+    if results.len == 0 then
+        ui.warning(""No credentials found"")
+        return
+    end if
+    ui.credentials(results)
+end function
+commandManager.register(_cmd)
+
+// --- targets ---
+_cmd = new Command
+_cmd.name = ""targets""
+_cmd.description = ""List or search targets database. Omit term to list all""
+_cmd.parameters = [StringParameter.New({""name"": ""term"", ""required"": false, ""default"": """"}),OptionsParameter.New({""name"": ""status"", ""required"": false, ""default"": """",""options"": {""unknown"": ""unknown"", ""scanned"": ""scanned"",""exploited"": ""exploited"", ""owned"": ""owned"",""bounce"": ""bounce"", ""all"": """"}})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui        = mediator.getExtension(""corvidUi"")
+        dbManager = mediator.getExtension(""databaseManager"")
+        if params.status.len > 0 then
+            results = dbManager.findTargetsByStatus(params.status)
+        else if params.term.len > 0 then
+            results = dbManager.findTarget(params.term)
+        else
+            results = dbManager.allTargets()
+        end if
+        if results.len == 0 then
+            ui.warning(""No targets found"")
+            return
+        end if
+        ui.targets(results)
+    end function
+commandManager.register(_cmd)
+
+// --- note ---
+_cmd = new Command
+_cmd.name = ""note""
+_cmd.description = ""Add a note to a database record""
+_cmd.parameters = [OptionsParameter.New({""name"": ""collection"", ""required"": true,""options"": {""person"": ""person"", ""org"": ""org"", ""target"": ""target""}}),StringParameter.New({""name"": ""id"",   ""required"": true}),RestParameter.New({""name"":   ""note"", ""required"": true})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui        = mediator.getExtension(""corvidUi"")
+        dbManager = mediator.getExtension(""databaseManager"")
+        result    = dbManager.addNote(params.collection, params.id, params.note)
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Note added to "" + params.collection + "" "" + params.id)
+    end function
+commandManager.register(_cmd)
+
+// --- kbstats ---
+_cmd = new Command
+_cmd.name = ""kbstats""
+_cmd.description = ""Show exploit knowledge base statistics and known lib/version coverage""
+_cmd.parameters = [StringParameter.New({""name"": ""libname"", ""required"": false, ""default"": """"})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+    ui        = mediator.getExtension(""corvidUi"")
+    dbManager = mediator.getExtension(""databaseManager"")
+
+    filterLib = params.libname.trim
+
+    ui.separator()
+    ui.highlight(""EXPLOIT KNOWLEDGE BASE"")
+    ui.separator()
+
+    stats = dbManager.kbStats()
+    ui.info(""Total records   : "" + str(stats.total))
+    ui.info(""Successful      : "" + str(stats.successes))
+    ui.info(""Constraint-blocked : "" + str(stats.blocked))
+    ui.info(""Uncertain       : "" + str(stats.uncertain))
+    ui.info(""Lib/versions covered: "" + str(stats.libVersions))
+    ui.print("""")
+
+    // Show per-lib breakdown
+    allRecords = dbManager.getExploitKb().db.all()
+    // Group by lib_name + lib_version
+    groups = {}
+    for r in allRecords
+        if not r.hasIndex(""lib_name"") then
+            continue
+        end if
+        if filterLib.len > 0 and r.lib_name.indexOf(filterLib) == null then
+            continue
+        end if
+        key = r.lib_name + "" v"" + r.lib_version
+        if not groups.hasIndex(key) then
+            groups[key] = {""success"": 0, ""blocked"": 0, ""uncertain"": 0, ""total"": 0}
+        end if
+        groups[key].total = groups[key].total + 1
+        o = ""uncertain""
+        if r.hasIndex(""outcome"") then
+            o = r.outcome
+        end if
+        if o == ""success"" then
+            groups[key].success = groups[key].success + 1
+        else if o == ""constraint_blocked"" then
+            groups[key].blocked = groups[key].blocked + 1
+        else
+            groups[key].uncertain = groups[key].uncertain + 1
+        end if
+    end for
+
+    if groups.indexes.len == 0 then
+        if filterLib.len > 0 then
+            ui.warning(""No KB records matching: "" + filterLib)
+        else
+            ui.warning(""No exploit KB records yet - run attacks to populate"")
+        end if
+        return
+    end if
+
+    ui.highlight(""LIB/VERSION BREAKDOWN"")
+    ui.separator()
+    for key in groups.indexes
+        g = groups[key]
+        statusStr = """"
+        if g.success > 0 then
+            statusStr = statusStr + str(g.success) + "" success  ""
+        end if
+        if g.blocked > 0 then
+            statusStr = statusStr + str(g.blocked) + "" blocked  ""
+        end if
+        if g.uncertain > 0 then
+            statusStr = statusStr + str(g.uncertain) + "" uncertain""
+        end if
+        if g.success > 0 then
+            ui.success(""  "" + key + ""  ["" + statusStr.trim + ""]"")
+        else if g.blocked > 0 then
+            ui.warning(""  "" + key + ""  ["" + statusStr.trim + ""]"")
+        else
+            ui.dim(""  "" + key + ""  ["" + statusStr.trim + ""]"")
+        end if
+    end for
+    ui.separator()
+end function
+commandManager.register(_cmd)
+
+// --- dbstats ---
+_cmd = new Command
+_cmd.name = ""dbstats""
+_cmd.description = ""Show database record counts""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui        = mediator.getExtension(""corvidUi"")
+        dbManager = mediator.getExtension(""databaseManager"")
+        ui.dbStats(dbManager.stats())
+    end function
+commandManager.register(_cmd)
+
+// --- dbsave ---
+_cmd = new Command
+_cmd.name = ""dbsave""
+_cmd.description = ""Force save all databases to disk""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+        ui        = mediator.getExtension(""corvidUi"")
+        dbManager = mediator.getExtension(""databaseManager"")
+        result    = dbManager.save()
+        if result isa Error then
+            return result
+        end if
+        ui.success(""Databases saved."")
+    end function
+commandManager.register(_cmd)
+
+// --- dbmigrate ---
+_cmd = new Command
+_cmd.name = ""dbmigrate""
+_cmd.description = ""Migrate existing credential records to add native_pass and source tags. Safe to run multiple times.""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+    ui        = mediator.getExtension(""corvidUi"")
+    dbManager = mediator.getExtension(""databaseManager"")
+
+    ui.separator()
+    ui.highlight(""DATABASE MIGRATION"")
+    ui.separator()
+    ui.info(""Scanning credential records for migration..."")
+
+    allCreds = dbManager.allCredentials()
+    updated  = 0
+    skipped  = 0
+
+    for rec in allCreds
+        needsUpdate = false
+
+        // Add native_pass field if missing
+        if not rec.hasIndex(""native_pass"") then
+            rec.native_pass = """"
+            needsUpdate = true
+        end if
+
+        // Tag source field if missing or unknown
+        if not rec.hasIndex(""source"") or rec.source.len == 0 or rec.source == ""unknown"" then
+            // Assume existing untagged records are native passwords
+            // (Corvid-generated passwords would have been tagged going forward)
+            rec.source = ""native""
+            needsUpdate = true
+        end if
+
+        // If source is ""harvest"" (old tag) convert to ""native""
+        if rec.hasIndex(""source"") and rec.source == ""harvest"" then
+            rec.source = ""native""
+            needsUpdate = true
+        end if
+
+        // If source is ""bounce"" (old tag) convert to ""hardened""
+        if rec.hasIndex(""source"") and rec.source == ""bounce"" then
+            rec.source = ""hardened""
+            needsUpdate = true
+        end if
+
+        // If source is one of the old router scan tags, convert to ""native""
+        if rec.hasIndex(""source"") then
+            if rec.source == ""router_scan"" or rec.source == ""router_lib_exploit"" or rec.source == ""router_lib_home"" or rec.source == ""router_home_scan"" or rec.source == ""portattack_lib"" or rec.source == ""portattack_home"" then
+                rec.source = ""native""
+                needsUpdate = true
+            end if
+        end if
+
+        if needsUpdate then
+            dbManager.updateCredentialRecord(rec)
+            updated = updated + 1
+        else
+            skipped = skipped + 1
+        end if
+    end for
+
+    dbManager.save()
+    ui.print("""")
+    ui.success(""Migration complete."")
+    ui.info(""  Updated : "" + str(updated) + "" records"")
+    ui.info(""  Skipped : "" + str(skipped) + "" (already migrated)"")
+    ui.separator()
+end function
+commandManager.register(_cmd)
+
+// --- dbclean ---
+_cmd = new Command
+_cmd.name = ""dbclean""
+_cmd.description = ""Deduplicate bloated notes fields across all target records""
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = ""file""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+    ui        = mediator.getExtension(""corvidUi"")
+    dbManager = mediator.getExtension(""databaseManager"")
+
+    ui.separator()
+    ui.highlight(""DATABASE CLEAN"")
+    ui.separator()
+
+    targets = dbManager.allTargets()
+    cleaned = 0
+    totalSaved = 0
+
+    for target in targets
+        if not target.hasIndex(""notes"") then
+            continue
+        end if
+        notes = target.notes
+        if notes == null or notes.len == 0 then
+            continue
+        end if
+
+        // Deduplicate notes - process line by line
+        lines = notes.split(""
+"")
+        seenLines = []
+        cleanLines = []
+
+        for line in lines
+            line = line.trim
+            if line.len == 0 then
+                continue
+            end if
+
+            // For bounce: lines - strip duplicate source: and health: tokens
+            if line.indexOf(""bounce:"") == 0 then
+                parts = line.split("" "")
+                cleanParts = []
+                seenSource = false
+                seenHealth = false
+                for part in parts
+                    if part.indexOf(""source:"") == 0 then
+                        if not seenSource then
+                            cleanParts.push(part)
+                            seenSource = true
+                        end if
+                    else if part.indexOf(""health:"") == 0 then
+                        if not seenHealth then
+                            cleanParts.push(part)
+                            seenHealth = true
+                        end if
+                    else
+                        cleanParts.push(part)
+                    end if
+                end for
+                line = cleanParts.join("" "")
+            end if
+
+            // Skip duplicate whole lines
+            alreadySeen = false
+            for seen in seenLines
+                if seen == line then
+                    alreadySeen = true
+                end if
+            end for
+            if not alreadySeen then
+                cleanLines.push(line)
+                seenLines.push(line)
+            end if
+        end for
+
+        newNotes = cleanLines.join(""
+"")
+        if newNotes != notes then
+            saved = notes.len - newNotes.len
+            totalSaved = totalSaved + saved
+            target.notes = newNotes
+            dbManager.targetDb.db.set(target.id, target)
+            dbManager.targetDb.db.dirty = true
+            cleaned = cleaned + 1
+            ui.info(""  Cleaned "" + target.id + "" ("" + str(saved) + "" chars removed)"")
+        end if
+    end for
+
+    if cleaned > 0 then
+        dbManager.save()
+        ui.success(""Cleaned "" + str(cleaned) + "" records"")
+        ui.success(""Removed "" + str(totalSaved) + "" characters of duplicate data"")
+    else
+        ui.info(""No bloated records found - DB is clean"")
+    end if
+    ui.separator()
+end function
+commandManager.register(_cmd)
+
+// ============================================================
+// BOUNCE
+// ============================================================
+",1)
