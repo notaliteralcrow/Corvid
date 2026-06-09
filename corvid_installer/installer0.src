@@ -1,0 +1,4811 @@
+s = get_shell;c = s.host_computer;existingStaging = c.File("/Corvid/asriN");if existingStaging != null then;    existingStaging.delete;    print("Cleaned up previous staging dir");end if;m = function(filePath, content, isNew);    segments = filePath.split("/")[1:];    fileName = segments.pop;    for segment in segments;        __segment_idx = segments.indexOf(segment);        parentPath = "/" + segments[:__segment_idx].join("/");        if parentPath == "/" then;            folderPath = "/" + segment;        else;            folderPath = parentPath + "/" + segment;        end if;        folderHandle = c.File(folderPath);        if folderHandle == null then;            result = c.create_folder(parentPath, segment);            if result != 1 then;                exit("Could not create folder: " + folderPath);            end if;        end if;    end for;    parentPath = "/" + segments.join("/");    fileEntity = c.File(filePath);    if fileEntity == null then;        result = c.touch(parentPath, fileName);        if result != 1 then;            exit("Could not create file: " + filePath);        end if;        fileEntity = c.File(filePath);    end if;    if isNew then;        fileEntity.set_content(content);        print("Written: " + filePath);    else;        fileEntity.set_content(fileEntity.get_content + content);        print("Appended: " + filePath);    end if;end function
+m("/Corvid/asriN/libs/json.txt","// ============================================================
+// CORVID | libs/json
+// JSON parse and serialize.
+// Sourced from the MiniScript community standard library.
+// ============================================================
+
+parse = function(jsonString)
+    p = new Parser
+    return p.parse(jsonString)
+end function
+
+toJSON = function(value, compact, indent)
+    if compact == null then
+        compact = true
+    end if
+    if indent == null then
+        indent = 0
+    end if
+    if @value isa funcRef then
+        return """"""<function>""""""
+    end if
+    if value == null then
+        return ""null""
+    end if
+    if value isa number then
+        return str(value)
+    end if
+    if value isa string then
+        return """""""" + _escapeStr(value) + """"""""
+    end if
+    if value isa list then
+        return _listToJSON(value, compact, indent)
+    end if
+    if typeof(value) == ""map"" then
+        return _mapToJSON(value, compact, indent)
+    end if
+    return ""null""
+end function
+
+_escapeStr = function(s)
+    result = """"
+    for ch in s
+        if ch == char(92) then
+            result = result + char(92) + char(92)
+        else if ch == char(34) then
+            result = result + char(92) + char(34)
+        else if ch == char(8) then
+            result = result + char(92) + ""b""
+        else if ch == char(9) then
+            result = result + char(92) + ""t""
+        else if ch == char(10) then
+            result = result + char(92) + ""n""
+        else if ch == char(12) then
+            result = result + char(92) + ""f""
+        else if ch == char(13) then
+            result = result + char(92) + ""r""
+        else
+            result = result + ch
+        end if
+    end for
+    return result
+end function
+
+_unescapeStr = function(s)
+    chars = []
+    i = 0
+    maxi = s.len
+    while i < maxi
+        di = 1
+        if s[i] == char(92) then
+            di = 2
+            c = s[i + 1]
+            if c == ""b"" then
+                chars.push(char(8))
+            else if c == ""t"" then
+                chars.push(char(9))
+            else if c == ""n"" then
+                chars.push(char(10))
+            else if c == ""f"" then
+                chars.push(char(12))
+            else if c == ""r"" then
+                chars.push(char(13))
+            else if c == ""u"" then
+                hex = s[i + 2 : i + 6]
+                chars.push(char(_hexToInt(hex)))
+                di = 6
+            else
+                chars.push(c)
+            end if
+        else
+            chars.push(s[i])
+        end if
+        i = i + di
+    end while
+    return chars.join("""")
+end function
+
+_hexToInt = function(s)
+    result = 0
+    for c in s
+        result = result * 16 + _hexDigitMap[c]
+    end for
+    return result
+end function
+
+_listToJSON = function(lst, compact, indent)
+    ws = (char(10) + ""  "" * (indent + 1)) * (not compact)
+    parts = [""["", ws]
+    first = true
+    for item in lst
+        if not first then
+            parts.push("","")
+            parts.push(ws)
+        end if
+        parts.push(toJSON(item, compact, indent + 1))
+        first = false
+    end for
+    if not compact then
+        parts.push(char(10) + ""  "" * indent)
+    end if
+    parts.push(""]"")
+    return parts.join("""")
+end function
+
+_mapToJSON = function(lst, compact, indent)
+    ws = (char(10) + ""  "" * (indent + 1)) * (not compact)
+    parts = [""{"", ws]
+    first = true
+    for kv in lst
+        if not first then
+            parts.push("","")
+            parts.push(ws)
+        end if
+        parts.push(toJSON(str(kv.key)))
+        parts.push("":"")
+        if not compact then
+            parts.push("" "")
+        end if
+        parts.push(toJSON(@kv.value, compact, indent + 1))
+        first = false
+    end for
+    if not compact then
+        parts.push(char(10) + ""  "" * indent)
+    end if
+    parts.push(""}"")
+    return parts.join("""")
+end function
+
+_eol = char(13)
+_hexDigitMap = {}
+for _i in range(0, 15)
+    if _i < 10 then
+        _hexDigitMap[str(_i)] = _i
+    else
+        _hexDigitMap[char(55 + _i)] = _i
+        _hexDigitMap[char(87 + _i)] = _i
+    end if
+end for
+// escape arrays removed - _escapeStr now char-by-char
+
+_whitespace = "" "" + char(9) + char(10) + char(13)
+
+Parser = {}
+Parser.source = """"
+Parser._sourceLen = 0
+Parser._p = 0
+Parser.init = function(source)
+    self.source = source
+    self._sourceLen = source.len
+end function
+Parser.parse = function(source)
+    if source != null then
+        self.init(source)
+    end if
+    self._p = 0
+    return self._parseElement
+end function
+Parser._skipWhitespace = function()
+    while self._p < self._sourceLen
+        if _whitespace.indexOf(self.source[self._p]) == null then
+            break
+        end if
+        self._p = self._p + 1
+    end while
+end function
+Parser._parseElement = function()
+    return self._parseValue
+end function
+Parser._parseValue = function()
+    self._skipWhitespace
+    c = self.source[self._p]
+    if c == """""""" then
+        return self._parseString
+    end if
+    if ""0123456789-."".indexOf(c) != null then
+        return self._parseNumber
+    end if
+    if c == ""["" then
+        return self._parseList
+    end if
+    if c == ""{"" then
+        return self._parseMap
+    end if
+    if c == ""t"" and self.source[self._p : self._p + 4] == ""true"" then
+        self._p = self._p + 4
+        return true
+    end if
+    if c == ""f"" and self.source[self._p : self._p + 5] == ""false"" then
+        self._p = self._p + 5
+        return false
+    end if
+    if c == ""n"" and self.source[self._p : self._p + 4] == ""null"" then
+        self._p = self._p + 4
+        return null
+    end if
+end function
+Parser._parseList = function()
+    self._p = self._p + 1
+    self._skipWhitespace
+    result = []
+    while self._p < self._sourceLen
+        c = self.source[self._p]
+        if c == ""]"" then
+            break
+        end if
+        result.push(self._parseElement)
+        self._skipWhitespace
+        c = self.source[self._p]
+        if c == "","" then
+            self._p = self._p + 1
+            self._skipWhitespace
+        end if
+    end while
+    self._p = self._p + 1
+    return result
+end function
+Parser._parseMap = function()
+    self._p = self._p + 1
+    self._skipWhitespace
+    result = {}
+    while self._p < self._sourceLen
+        c = self.source[self._p]
+        if c == ""}"" then
+            break
+        end if
+        if c != """""""" then
+            self._p = self._p + 1
+        else
+            key = self._parseString
+            self._skipWhitespace
+            if self.source[self._p] != "":"" then
+                self._p = self._p + 1
+            else
+                self._p = self._p + 1
+                self._skipWhitespace
+                value = self._parseElement
+                result[key] = value
+                self._skipWhitespace
+                c = self.source[self._p]
+                if c == "","" then
+                    self._p = self._p + 1
+                    self._skipWhitespace
+                end if
+            end if
+        end if
+    end while
+    self._p = self._p + 1
+    return result
+end function
+Parser._parseString = function()
+    self._p = self._p + 1
+    startPos = self._p
+    anyEscape = false
+    while self._p < self._sourceLen
+        c = self.source[self._p]
+        self._p = self._p + 1
+        if c == """""""" then
+            break
+        end if
+        if c == char(92) then
+            anyEscape = true
+            self._p = self._p + 1
+        end if
+    end while
+    result = self.source[startPos : self._p - 1]
+    if anyEscape then
+        result = _unescapeStr(result)
+    end if
+    return result
+end function
+Parser._parseNumber = function()
+    startPos = self._p
+    while self._p < self._sourceLen
+        c = self.source[self._p]
+        if ""0123456789+-.eE"".indexOf(c) == null then
+            break
+        end if
+        self._p = self._p + 1
+    end while
+    return val(self.source[startPos : self._p])
+end function
+",1)
+m("/Corvid/asriN/utils/findWritePerms.txt","// ============================================================
+// CORVID | utils/findWritePerms
+// Finds a writable path on the target for deploying RCE scripts.
+// Ported from Scion by NitroCynic (MIT License).
+// Returns a map with .path string or null if none found.
+// ============================================================
+
+findWritePerms = function(shell)
+    candidates = [""/root"", ""/home/guest"", ""/home/user"", ""/shiny"", ""/var""]
+    for candidate in candidates
+        dir = shell.host_computer.File(candidate)
+        if dir == null then
+            continue
+        end if
+        if typeof(dir) == ""string"" then
+            continue
+        end if
+        if dir.has_permission(""w"") then
+            result = {}
+            result.path = candidate
+            return result
+        end if
+    end for
+    return null
+end function
+",1)
+m("/Corvid/asriN/libs/error.txt","// ============================================================
+// CORVID | libs/error
+// Typed error object. Replaces null/string error returns
+// throughout the entire codebase.
+// ============================================================
+
+Error = {}
+Error.message = null
+Error.code = null
+Error.New = function(message, code)
+    result = new Error
+    result.message = message
+    if code == null then
+        result.code = ""GENERIC""
+    else
+        result.code = code
+    end if
+    return result
+end function
+Error.toString = function()
+    return ""[ERROR:"" + self.code + ""] "" + self.message
+end function
+",1)
+m("/Corvid/asriN/libs/functional.txt","// ============================================================
+// CORVID | libs/functional
+// Functional programming utilities.
+// map, find, some, flat, indexOf.
+// ============================================================
+
+isIterable = function(item)
+    if typeof(item) == ""map"" then
+        return true
+    end if
+    if typeof(item) == ""list"" then
+        return true
+    end if
+    return false
+end function
+
+map = function(list, callback)
+    if typeof(list) == ""map"" then
+        newList = {}
+    end if
+    if typeof(list) == ""list"" then
+        newList = []
+    end if
+    if not isIterable(list) then
+        return Error.New(""map requires a list or map"", ""TYPE_ERROR"")
+    end if
+    if typeof(list) == ""map"" then
+        for item in list
+            k = item.key
+            newList[k] = callback(item)
+        end for
+    end if
+    if typeof(list) == ""list"" then
+        for v in list
+            newList.push(callback(v))
+        end for
+    end if
+    return newList
+end function
+
+find = function(list, callback)
+    if not isIterable(list) then
+        return Error.New(""find requires a list or map"", ""TYPE_ERROR"")
+    end if
+    for v in list
+        if callback(v) then
+            return v
+        end if
+    end for
+    return null
+end function
+
+some = function(list, callback)
+    if not isIterable(list) then
+        return Error.New(""some requires a list or map"", ""TYPE_ERROR"")
+    end if
+    for v in list
+        if callback(v) then
+            return true
+        end if
+    end for
+    return false
+end function
+
+flat = function(list)
+    if typeof(list) != ""list"" then
+        return Error.New(""flat requires a list"", ""TYPE_ERROR"")
+    end if
+    result = []
+    for item in list
+        if typeof(item) == ""list"" then
+            for nested in item
+                result.push(nested)
+            end for
+        else
+            result.push(item)
+        end if
+    end for
+    return result
+end function
+
+indexOf = function(list, item)
+    if typeof(list) != ""list"" then
+        return Error.New(""indexOf requires a list"", ""TYPE_ERROR"")
+    end if
+    for i in range(0, list.len - 1)
+        if list[i] == item then
+            return i
+        end if
+    end for
+    return null
+end function
+",1)
+m("/Corvid/asriN/libs/string.txt","// ============================================================
+// CORVID | libs/string
+// String utility functions.
+// ============================================================
+
+startsWith = function(str, prefix)
+    return str.indexOf(prefix) == 0
+end function
+
+padRight = function(str, width)
+    str = str + """"
+    while str.len < width
+        str = str + "" ""
+    end while
+    return str
+end function
+
+trimLeft = function(str)
+    i = 0
+    while i < str.len and str[i] == "" ""
+        i = i + 1
+    end while
+    return str[i:]
+end function
+
+trimRight = function(str)
+    i = str.len - 1
+    while i >= 0 and str[i] == "" ""
+        i = i - 1
+    end while
+    return str[:i + 1]
+end function
+
+trim = function(str)
+    return trimLeft(trimRight(str))
+end function
+
+",1)
+m("/Corvid/asriN/libs/ssv.txt","// ============================================================
+// CORVID | libs/ssv
+// Space-separated value parser.
+// Used for parsing show_procs and similar game output.
+// ============================================================
+
+ssvToList = function(csv)
+    lineSplitter = function(line)
+        return line.split("" "")
+    end function
+    lines = map(csv.split(char(10)), @lineSplitter)
+
+    names = []
+    firstLine = lines.pull()
+    for item in firstLine
+        if item.len > 0 then
+            names.push(item)
+        end if
+    end for
+
+    result = []
+    for line in lines
+        if line.len == 0 then
+            continue
+        end if
+        row = {}
+        for i in range(0, names.len - 1)
+            if line.hasIndex(i) then
+                row[names[i]] = line[i]
+            else
+                row[names[i]] = """"
+            end if
+        end for
+        result.push(row)
+    end for
+
+    return result
+end function
+",1)
+m("/Corvid/asriN/mediator.txt","// ============================================================
+// CORVID | mediator
+// ExtensionMediator  -  the central communication broker.
+// All managers register here and communicate through here.
+// No manager ever holds a direct reference to another.
+// ============================================================
+
+ExtensionMediator = {}
+ExtensionMediator.extensions = {}
+ExtensionMediator.addExtension = function(name, extension)
+    self.extensions[name] = extension
+    if extension != null then
+        extension.setMediator(self)
+    end if
+end function
+ExtensionMediator.getExtension = function(name)
+    if not self.extensions.hasIndex(name) then
+        return null
+    end if
+    return self.extensions[name]
+end function
+ExtensionMediator.removeExtension = function(name)
+    self.extensions.remove(name)
+end function
+ExtensionMediator.New = function()
+    result = new ExtensionMediator
+    result.extensions = {}
+    return result
+end function
+",1)
+m("/Corvid/asriN/facades/file.txt","// ============================================================
+// CORVID | facades/file
+// Wraps the game File object.
+// All methods return typed results  -  never raw null or strings.
+// Directories are Files with type FOLDER.
+// ============================================================
+
+FILE_TYPES = {}
+FILE_TYPES.FILE   = ""FILE""
+FILE_TYPES.FOLDER = ""FOLDER""
+
+File = {}
+File.file = null
+
+File.name = function()
+    return self.file.name
+end function
+
+File.path = function()
+    return self.file.path
+end function
+
+File.owner = function()
+    return self.file.owner
+end function
+
+File.group = function()
+    return self.file.group
+end function
+
+File.permissions = function()
+    return self.file.permissions
+end function
+
+File.size = function()
+    return self.file.size
+end function
+
+File.type = function()
+    if self.file.is_folder then
+        return FILE_TYPES.FOLDER
+    end if
+    return FILE_TYPES.FILE
+end function
+
+File.isBinary = function()
+    return self.file.is_binary == 1
+end function
+
+File.hasPermission = function(permission)
+    return self.file.has_permission(permission)
+end function
+
+File.content = function()
+    if self.type() == FILE_TYPES.FOLDER then
+        return Error.New(""Cannot read content of a folder"", ""TYPE_ERROR"")
+    end if
+    if self.isBinary() then
+        return Error.New(""File is binary and cannot be read as text"", ""BINARY_FILE"")
+    end if
+    result = self.file.get_content
+    if result == null then
+        return Error.New(""Could not read file content"", ""READ_ERROR"")
+    end if
+    return result
+end function
+
+File.setContent = function(newContent)
+    if self.type() == FILE_TYPES.FOLDER then
+        return Error.New(""Cannot set content of a folder"", ""TYPE_ERROR"")
+    end if
+    result = self.file.set_content(newContent)
+    if not result then
+        return Error.New(""Could not write file content"", ""WRITE_ERROR"")
+    end if
+end function
+
+File.appendContent = function(newContent)
+    if self.type() == FILE_TYPES.FOLDER then
+        return Error.New(""Cannot append content to a folder"", ""TYPE_ERROR"")
+    end if
+    existing = self.content()
+    if existing isa Error then
+        return existing
+    end if
+    return self.setContent(existing + newContent)
+end function
+
+File.children = function()
+    if self.type() == FILE_TYPES.FILE then
+        return Error.New(""Cannot get children of a file"", ""TYPE_ERROR"")
+    end if
+    raw = self.file.get_files() + self.file.get_folders()
+    wrapChild = function(child)
+        return File.New(child)
+    end function
+    return map(raw, @wrapChild)
+end function
+
+File.child = function(name)
+    kids = self.children()
+    if kids isa Error then
+        return kids
+    end if
+    matchName = function(child)
+        return child.name() == name
+    end function
+    result = find(kids, @matchName)
+    if result == null then
+        return Error.New(""Child not found: "" + name, ""NOT_FOUND"")
+    end if
+    return result
+end function
+
+File.hasChild = function(name)
+    result = self.child(name)
+    return not (result isa Error)
+end function
+
+File.parent = function()
+    raw = self.file.parent
+    if raw == null then
+        return Error.New(""No parent  -  already at root"", ""AT_ROOT"")
+    end if
+    return File.New(raw)
+end function
+
+File.copy = function(destination, name)
+    if name == null then
+        name = self.name()
+    end if
+    result = self.file.copy(destination, name)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""COPY_ERROR"")
+    end if
+end function
+
+File.move = function(destination, name)
+    if name == null then
+        name = self.name()
+    end if
+    result = self.file.move(destination, name)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""MOVE_ERROR"")
+    end if
+end function
+
+File.rename = function(newName)
+    result = self.file.rename(newName)
+    if typeof(result) == ""string"" and result.len > 0 then
+        return Error.New(result, ""RENAME_ERROR"")
+    end if
+end function
+
+File.delete = function()
+    if self.type() == FILE_TYPES.FOLDER then
+        kids = self.children()
+        if not (kids isa Error) then
+            for child in kids
+                child.delete()
+            end for
+        end if
+    end if
+    if self.path() == ""/"" then
+        return
+    end if
+    result = self.file.delete()
+    if typeof(result) == ""string"" and result.len > 0 then
+        return Error.New(result, ""DELETE_ERROR"")
+    end if
+end function
+
+File.setPermissions = function(perms, recursive)
+    if recursive == null then
+        recursive = false
+    end if
+    result = self.file.chmod(perms, recursive)
+    if typeof(result) == ""string"" and result.len > 0 then
+        return Error.New(result, ""CHMOD_ERROR"")
+    end if
+end function
+
+File.setOwner = function(owner, recursive)
+    if recursive == null then
+        recursive = false
+    end if
+    result = self.file.set_owner(owner, recursive)
+    if typeof(result) == ""string"" and result.len > 0 then
+        return Error.New(result, ""CHOWN_ERROR"")
+    end if
+end function
+
+File.setGroup = function(group, recursive)
+    if recursive == null then
+        recursive = false
+    end if
+    result = self.file.set_group(group, recursive)
+    if typeof(result) == ""string"" and result.len > 0 then
+        return Error.New(result, ""CHGRP_ERROR"")
+    end if
+end function
+
+File.New = function(file)
+    if typeof(file) != ""file"" then
+        return Error.New(""Cannot create File from non-file object"", ""TYPE_ERROR"")
+    end if
+    result = new File
+    result.file = file
+    return result
+end function
+",1)
+m("/Corvid/asriN/facades/computer.txt","// ============================================================
+// CORVID | facades/computer
+// Wraps the game Computer object.
+// ============================================================
+
+Computer = {}
+Computer.computer = null
+
+Computer.name = function()
+    return self.computer.get_name
+end function
+
+Computer.lanIp = function()
+    return self.computer.local_ip
+end function
+
+Computer.getFile = function(path)
+    result = self.computer.File(path)
+    if result == null then
+        return Error.New(""File not found: "" + path, ""NOT_FOUND"")
+    end if
+    return File.New(result)
+end function
+
+Computer.touch = function(path, name)
+    result = self.computer.touch(path, name)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""TOUCH_ERROR"")
+    end if
+end function
+
+Computer.createFolder = function(path, name)
+    result = self.computer.create_folder(path, name)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""MKDIR_ERROR"")
+    end if
+end function
+
+Computer.addUser = function(user, password)
+    result = self.computer.create_user(user, password)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""ADDUSER_ERROR"")
+    end if
+end function
+
+Computer.deleteUser = function(user, removeHome)
+    if removeHome == null then
+        removeHome = false
+    end if
+    result = self.computer.delete_user(user, removeHome)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""DELUSER_ERROR"")
+    end if
+end function
+
+Computer.changePassword = function(user, password)
+    result = self.computer.change_password(user, password)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""PASSWD_ERROR"")
+    end if
+end function
+
+Computer.showProcs = function()
+    return ssvToList(self.computer.show_procs)
+end function
+
+Computer.closeProcess = function(pid)
+    result = self.computer.close_program(pid.val)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""KILL_ERROR"")
+    end if
+end function
+
+Computer.getPorts = function()
+    return self.computer.get_ports
+end function
+
+Computer.isNetworkActive = function()
+    return self.computer.is_network_active == 1
+end function
+
+Computer.New = function(computer)
+    if typeof(computer) != ""computer"" then
+        return Error.New(""Cannot create Computer from non-computer object"", ""TYPE_ERROR"")
+    end if
+    result = new Computer
+    result.computer = computer
+    return result
+end function
+",1)
+m("/Corvid/asriN/facades/shell.txt","// ============================================================
+// CORVID | facades/shell
+// Wraps the game Shell object.
+// ============================================================
+
+Shell = {}
+Shell.shell = null
+
+Shell.getComputer = function()
+    result = self.shell.host_computer
+    if result == null then
+        return Error.New(""No computer associated with this shell"", ""NO_COMPUTER"")
+    end if
+    return Computer.New(result)
+end function
+
+Shell.connectTo = function(ip, port, user, pass, service)
+    if service == null then
+        service = ""ssh""
+    end if
+    result = self.shell.connect_service(ip, port, user, pass, service)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""CONNECT_ERROR"")
+    end if
+    return Shell.New(result)
+end function
+
+Shell.transferFile = function(srcPath, destPath, otherShell)
+    result = self.shell.scp(srcPath, destPath, otherShell.shell)
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""SCP_ERROR"")
+    end if
+    return result
+end function
+
+Shell.launch = function(path, args)
+    if args == null then
+        args = """"
+    end if
+    result = self.shell.launch(path, args)
+    if result == false then
+        return Error.New(""Failed to launch: "" + path, ""LAUNCH_ERROR"")
+    end if
+end function
+
+Shell.build = function(srcPath, destPath)
+    result = self.shell.build(srcPath, destPath)
+    if typeof(result) == ""string"" and result.len > 0 then
+        return Error.New(result, ""BUILD_ERROR"")
+    end if
+end function
+
+Shell.activate = function()
+    self.shell.start_terminal()
+end function
+
+Shell.masterKey = function(ip, port, user)
+    return self.shell.masterkey(ip, port, user)
+end function
+
+Shell.New = function(shell)
+    if typeof(shell) != ""shell"" then
+        return Error.New(""Cannot create Shell from non-shell object"", ""TYPE_ERROR"")
+    end if
+    result = new Shell
+    result.shell = shell
+    return result
+end function
+",1)
+m("/Corvid/asriN/facades/router.txt","// ============================================================
+// CORVID | facades/router
+// Wraps the game Router object.
+// devices() returns a fully annotated map of all devices
+// and their ports including service type, version,
+// forwarding status, and open/closed state.
+// ============================================================
+
+Router = {}
+Router.router = null
+
+Router.publicIp = function()
+    return self.router.public_ip
+end function
+
+Router.localIp = function()
+    return self.router.local_ip
+end function
+
+Router.kernelVersion = function()
+    return self.router.kernel_version
+end function
+
+Router.bssid = function()
+    return self.router.bssid_name
+end function
+
+Router.essid = function()
+    return self.router.essid_name
+end function
+
+Router.firewallRules = function()
+    return self.router.firewall_rules
+end function
+
+Router.usedPorts = function()
+    return self.router.used_ports
+end function
+
+Router.deviceIps = function()
+    return self.router.devices_lan_ip
+end function
+
+Router.devicePorts = function(lanIp)
+    return self.router.device_ports(lanIp)
+end function
+
+Router.portInfo = function(port)
+    raw = self.router.port_info(port)
+    result = {}
+    parts = raw.split("" "")
+    if parts.len >= 1 then
+        result.service = parts[0]
+    end if
+    if parts.len >= 2 then
+        result.version = parts[1]
+    end if
+    if result.service == null then
+        result.service = ""unknown""
+    end if
+    if result.version == null then
+        result.version = ""unknown""
+    end if
+    return result
+end function
+
+Router.pingPort = function(portNumber)
+    return self.router.ping_port(portNumber)
+end function
+
+Router.devices = function()
+    ips        = self.deviceIps()
+    usedPorts  = self.usedPorts()
+    router     = self.router
+
+    isForwarded = function(port)
+        checkPort = function(usedPort)
+            return usedPort.get_lan_ip == port.get_lan_ip and usedPort.port_number == port.port_number
+        end function
+        return some(usedPorts, @checkPort)
+    end function
+
+    buildPortInfo = function(port)
+        info    = router.port_info(port)
+        parts   = info.split("" "")
+        result  = {}
+        result.port      = port.port_number
+        result.lanIp     = port.get_lan_ip
+        result.open      = not port.is_closed
+        result.forwarded = isForwarded(port)
+        result.service   = ""unknown""
+        result.version   = ""unknown""
+        if parts.len >= 1 then
+            result.service = parts[0]
+        end if
+        if parts.len >= 2 then
+            result.version = parts[1]
+        end if
+        return result
+    end function
+
+    devices = {}
+    for ip in ips
+        rawPorts = self.devicePorts(ip)
+        portList = []
+        for rawPort in rawPorts
+            portList.push(buildPortInfo(rawPort))
+        end for
+        devices[ip] = portList
+    end for
+
+    // Add the router itself as a device on port 0
+    routerIp = self.localIp()
+    if not devices.hasIndex(routerIp) then
+        devices[routerIp] = []
+    end if
+    routerEntry = {}
+    routerEntry.port      = 0
+    routerEntry.lanIp     = routerIp
+    routerEntry.open      = true
+    routerEntry.forwarded = true
+    routerEntry.service   = ""kernel_router""
+    routerEntry.version   = self.kernelVersion()
+    devices[routerIp].push(routerEntry)
+
+    return devices
+end function
+
+Router.New = function(ip)
+    if not is_valid_ip(ip) then
+        return Error.New(""Invalid IP address: "" + ip, ""INVALID_IP"")
+    end if
+    // Check if current shell has internet before calling get_router
+    s = get_shell
+    if s == null then
+        return Error.New(""No active shell - cannot reach router for: "" + ip, ""NO_SHELL"")
+    end if
+    raw = get_router(ip)
+    if raw == null then
+        return Error.New(""No router found for: "" + ip + "" (check internet connection)"", ""NOT_FOUND"")
+    end if
+    result = new Router
+    result.router = raw
+    return result
+end function
+
+Router.Local = function()
+    s = get_shell
+    if s == null then
+        return Error.New(""No active shell - cannot reach local router"", ""NO_SHELL"")
+    end if
+    raw = get_router()
+    if raw == null then
+        return Error.New(""Could not find local router (check internet connection)"", ""NOT_FOUND"")
+    end if
+    result = new Router
+    result.router = raw
+    return result
+end function
+",1)
+m("/Corvid/asriN/facades/metaxploit.txt","// ============================================================
+// CORVID | facades/metaxploit
+// Wraps the game MetaxploitLib object.
+// hack() provides a fully automated scan-and-exploit chain.
+// getVulnerabilities() returns structured exploit data.
+// ============================================================
+
+Metaxploit = {}
+Metaxploit.metaxploit = null
+
+Metaxploit.netUse = function(ip, port)
+    if port == null then
+        session = self.metaxploit.net_use(ip)
+    else
+        session = self.metaxploit.net_use(ip, port)
+    end if
+    if session == null then
+        return Error.New(""Could not connect to "" + ip, ""CONNECT_ERROR"")
+    end if
+    return session
+end function
+
+Metaxploit.load = function(path)
+    result = self.metaxploit.load(path)
+    if result == null then
+        return Error.New(""Could not load library from: "" + path, ""LOAD_ERROR"")
+    end if
+    return result
+end function
+
+Metaxploit.scan = function(metaLib)
+    result = self.metaxploit.scan(metaLib)
+    if result == null then
+        return Error.New(""Scan returned null  -  library may be unvulnerable"", ""SCAN_ERROR"")
+    end if
+    return result
+end function
+
+Metaxploit.scanAddress = function(metaLib, address)
+    result = self.metaxploit.scan_address(metaLib, address)
+    if result == null then
+        return Error.New(""scan_address returned null for: "" + address, ""SCAN_ERROR"")
+    end if
+    return result
+end function
+
+Metaxploit.flockClient = function(ip, port, processName)
+    if processName == null then
+        processName = ""ps""
+    end if
+    result = self.metaxploit.rshell_client(ip, port, processName)
+    if result == false then
+        return Error.New(""Failed to launch flock client"", ""FLOCK_ERROR"")
+    end if
+end function
+
+Metaxploit.flockServer = function()
+    result = self.metaxploit.rshell_server()
+    if typeof(result) == ""string"" then
+        return Error.New(result, ""FLOCK_ERROR"")
+    end if
+    return result
+end function
+
+Metaxploit.sniffer = function(saveEncSource)
+    return self.metaxploit.sniffer(saveEncSource)
+end function
+
+Metaxploit.getVulnerabilities = function(metaLib)
+    // Returns a list of {address, exploits[]} objects
+    addresses = self.scan(metaLib)
+    if addresses isa Error then
+        return addresses
+    end if
+    if addresses.len == 0 then
+        return Error.New(""No vulnerable regions found"", ""NO_VULNS"")
+    end if
+
+    results = []
+    for address in addresses
+        scanResult = self.scanAddress(metaLib, address)
+        if scanResult isa Error then
+            continue
+        end if
+
+        exploits  = []
+        segments  = scanResult.split(""Unsafe check: "")[1:]
+        for segment in segments
+            labelStart = segment.indexOf(""<b>"")
+            labelEnd   = segment.indexOf(""</b>"")
+            if labelStart == null or labelEnd == null then
+                continue
+            end if
+            value = segment[labelStart + 3 : labelEnd]
+            if value.len > 0 then
+                exploits.push(value)
+            end if
+        end for
+
+        if exploits.len > 0 then
+            entry = {}
+            entry.address = address
+            entry.exploits = exploits
+            results.push(entry)
+        end if
+    end for
+
+    if results.len == 0 then
+        return Error.New(""No parseable exploit values found"", ""NO_EXPLOITS"")
+    end if
+    return results
+end function
+
+Metaxploit.hack = function(metaLib)
+    // Full automated exploit chain.
+    // Returns a list of wrapped result objects sorted by quality.
+    vulns = self.getVulnerabilities(metaLib)
+    if vulns isa Error then
+        return vulns
+    end if
+
+    results = []
+    for vuln in vulns
+        for exploit in vuln.exploits
+            result = metaLib.overflow(vuln.address, exploit)
+            if result == null or typeof(result) == ""number"" or typeof(result) == ""string"" then
+                continue
+            end if
+            entry = {}
+            entry.address = vuln.address
+            entry.exploit = exploit
+            entry.raw     = result
+            entry.rtype   = typeof(result)
+            results.push(entry)
+        end for
+    end for
+
+    if results.len == 0 then
+        return Error.New(""All exploits failed"", ""EXPLOIT_FAILED"")
+    end if
+    return results
+end function
+
+Metaxploit.New = function(object)
+    if typeof(object) != ""MetaxploitLib"" then
+        return Error.New(""Cannot create Metaxploit from non-MetaxploitLib object"", ""TYPE_ERROR"")
+    end if
+    result = new Metaxploit
+    result.metaxploit = object
+    return result
+end function
+",1)
+m("/Corvid/asriN/facades/crypto.txt","// ============================================================
+// CORVID | facades/crypto
+// Wraps the game cryptoLib object.
+// decipher() takes BOTH username and hash as required
+// by the API  -  crypto.decipher(username, hash).
+// ============================================================
+
+Crypto = {}
+Crypto.crypto = null
+
+Crypto.decipher = function(username, hash)
+    result = self.crypto.decipher(hash)
+    if result == null then
+        return Error.New(""Could not decipher hash for: "" + username, ""DECIPHER_FAILED"")
+    end if
+    return result
+end function
+
+Crypto.aircrack = function(filepath)
+    result = self.crypto.aircrack(filepath)
+    if result == null then
+        return Error.New(""aircrack failed on: "" + filepath, ""AIRCRACK_ERROR"")
+    end if
+    return result
+end function
+
+Crypto.aireplay = function(bssid, essid, maxAcks)
+    return self.crypto.aireplay(bssid, essid, maxAcks)
+end function
+
+Crypto.airmon = function(option, iface)
+    return self.crypto.airmon(option, iface)
+end function
+
+Crypto.smtpUserList = function(ip, port)
+    result = self.crypto.smtp_user_list(ip, port)
+    if result == null then
+        return Error.New(""smtp_user_list failed"", ""SMTP_ERROR"")
+    end if
+    return result
+end function
+
+Crypto.New = function(object)
+    if typeof(object) != ""cryptoLib"" then
+        return Error.New(""Cannot create Crypto from non-cryptoLib object"", ""TYPE_ERROR"")
+    end if
+    result = new Crypto
+    result.crypto = object
+    return result
+end function
+",1)
+m("/Corvid/asriN/facades/factory.txt","// ============================================================
+// CORVID | facades/factory
+// computerObjectFactory  -  wraps any raw game object in the
+// appropriate facade based on its typeof() result.
+// ============================================================
+
+computerObjectFactory = function(object)
+    if typeof(object) == ""file""     then
+        return File.New(object)
+    end if
+    if typeof(object) == ""computer"" then
+        return Computer.New(object)
+    end if
+    if typeof(object) == ""shell""    then
+        return Shell.New(object)
+    end if
+    return Error.New(""Cannot wrap unknown object type: "" + typeof(object), ""TYPE_ERROR"")
+end function
+",1)
+m("/Corvid/asriN/utils/climbFileToRoot.txt","// ============================================================
+// CORVID | utils/climbFileToRoot
+// Starting from any File, walks parent references until
+// it reaches the root node (the parent call returns Error).
+// Returns the root File object.
+// ============================================================
+
+climbFileToRoot = function(file)
+    if not (file isa File) then
+        return Error.New(""climbFileToRoot requires a File object"", ""TYPE_ERROR"")
+    end if
+    current = file
+    while true
+        parent = current.parent()
+        if parent isa Error then
+            break
+        end if
+        current = parent
+    end while
+    return current
+end function
+",1)
+m("/Corvid/asriN/utils/getUserFromHandler.txt","// ============================================================
+// CORVID | utils/getUserFromHandler
+// Detects the privilege level of the current session handler
+// by checking file write permissions.
+// Returns: ""root"" | ""user"" | ""guest"" | ""unknown""
+// ============================================================
+
+getUserFromHandler = function(handler)
+    rootFile = handler.getFile(""/root"")
+    if not (rootFile isa Error) and rootFile.hasPermission(""w"") then
+        return ""root""
+    end if
+
+    homeFile = handler.getFile(""/home"")
+    if not (homeFile isa Error) then
+        for user in homeFile.children()
+            if user isa Error then
+                continue
+            end if
+            if user.name() == ""guest"" then
+                continue
+            end if
+            if user.hasPermission(""w"") then
+                return user.name()
+            end if
+        end for
+    end if
+
+    guestFile = handler.getFile(""/home/guest"")
+    if not (guestFile isa Error) and guestFile.hasPermission(""w"") then
+        return ""guest""
+    end if
+
+    return ""unknown""
+end function
+",1)
+m("/Corvid/asriN/utils/randomIp.txt","// ============================================================
+// CORVID | utils/randomIp
+// Generates a random valid public IP that has a router.
+// Used by the findlib command to scan for services.
+// ============================================================
+
+randomIp = function()
+    ip = """"
+    for i in range(1, 4)
+        ip = ip + floor(rnd() * 254 + 1)
+        if i < 4 then
+            ip = ip + "".""
+        end if
+    end for
+    if get_router(ip) == null then
+        return randomIp()
+    end if
+    return ip
+end function
+",1)
+m("/Corvid/asriN/utils/genRandomPass.txt","// ============================================================
+// CORVID | utils/genRandomPass
+// Centralised random password generator.
+// Used by bounces harden, verify reattack, and any other
+// place that needs to generate a fresh credential.
+//
+// Avoids the ad-hoc per-call-site seed patterns scattered
+// through the codebase. Salt parameter lets callers add
+// per-target entropy (e.g. an IP) without colliding when
+// adjacent calls land in the same time tick.
+// ============================================================
+
+__genPassCounter = 0
+
+genRandomPass = function(length, salt)
+    if length == null or length < 1 then
+        length = 12
+    end if
+    if salt == null then
+        salt = """"
+    end if
+    chars = ""abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789""
+    // Combine time, salt length, and a per-call counter so successive
+    // calls within the same time tick produce different output.
+    __genPassCounter = __genPassCounter + 1
+    seed = floor(time * 1000) + salt.len * 17 + __genPassCounter * 31
+    out = """"
+    for i in range(0, length - 1)
+        idx = (seed + i * 7 + salt.len * 3) % chars.len
+        out = out + chars[idx]
+        seed = (seed * 13 + 7) % 99999
+    end for
+    return out
+end function
+",1)
+m("/Corvid/asriN/managers/command.txt","// ============================================================
+// CORVID | managers/command/command
+// Command and Parameter type definitions.
+// Typed parameter parsing with validation before any
+// command handler ever runs.
+// ============================================================
+
+// ============================================================
+// PARAMETER TYPES
+// ============================================================
+
+PARAMETER_TYPES = {}
+PARAMETER_TYPES.STRING  = ""string""
+PARAMETER_TYPES.NUMBER  = ""number""
+PARAMETER_TYPES.BOOLEAN = ""boolean""
+PARAMETER_TYPES.REST    = ""rest""
+PARAMETER_TYPES.FLAG    = ""flag""
+PARAMETER_TYPES.OPTIONS = ""options""
+
+// ---- StringParameter ----
+
+StringParameter = {}
+StringParameter.name     = null
+StringParameter.required = false
+StringParameter.default  = null
+StringParameter.type     = PARAMETER_TYPES.STRING
+StringParameter.handle = function(args, index)
+    if not args.hasIndex(index) then
+        if self.required then
+            return Error.New(""Missing required parameter: "" + self.name, ""MISSING_PARAM"")
+        end if
+        return [self.default, index + 1]
+    end if
+    return [args[index], index + 1]
+end function
+StringParameter.New = function(options)
+    p = new StringParameter
+    if not options.hasIndex(""name"") then
+        return Error.New(""Parameter requires a name"", ""MISSING_PARAM"")
+    end if
+    p.name     = options.name
+    p.required = options.hasIndex(""required"") and options.required
+    p.default  = null
+    if options.hasIndex(""default"") then
+        p.default = options.default
+    end if
+    return p
+end function
+
+// ---- NumberParameter ----
+
+NumberParameter = {}
+NumberParameter.name     = null
+NumberParameter.required = false
+NumberParameter.default  = null
+NumberParameter.type     = PARAMETER_TYPES.NUMBER
+NumberParameter.handle = function(args, index)
+    if not args.hasIndex(index) then
+        if self.required then
+            return Error.New(""Missing required parameter: "" + self.name, ""MISSING_PARAM"")
+        end if
+        return [self.default, index + 1]
+    end if
+    raw = args[index]
+    num = raw.val
+    if typeof(num) == ""string"" then
+        return Error.New(""Parameter '"" + self.name + ""' must be a number"", ""TYPE_ERROR"")
+    end if
+    return [num, index + 1]
+end function
+NumberParameter.New = function(options)
+    p = new NumberParameter
+    if not options.hasIndex(""name"") then
+        return Error.New(""Parameter requires a name"", ""MISSING_PARAM"")
+    end if
+    p.name     = options.name
+    p.required = options.hasIndex(""required"") and options.required
+    p.default  = null
+    if options.hasIndex(""default"") then
+        p.default = options.default
+    end if
+    return p
+end function
+
+// ---- BooleanParameter ----
+
+BooleanParameter = {}
+BooleanParameter.name     = null
+BooleanParameter.required = false
+BooleanParameter.default  = null
+BooleanParameter.type     = PARAMETER_TYPES.BOOLEAN
+BooleanParameter.handle = function(args, index)
+    if not args.hasIndex(index) then
+        if self.required then
+            return Error.New(""Missing required parameter: "" + self.name, ""MISSING_PARAM"")
+        end if
+        return [self.default, index + 1]
+    end if
+    raw = args[index]
+    if raw == ""true""  then
+        return [true,  index + 1]
+    end if
+    if raw == ""false"" then
+        return [false, index + 1]
+    end if
+    return Error.New(""Parameter '"" + self.name + ""' must be true or false"", ""TYPE_ERROR"")
+end function
+BooleanParameter.New = function(options)
+    p = new BooleanParameter
+    if not options.hasIndex(""name"") then
+        return Error.New(""Parameter requires a name"", ""MISSING_PARAM"")
+    end if
+    p.name     = options.name
+    p.required = options.hasIndex(""required"") and options.required
+    p.default  = null
+    if options.hasIndex(""default"") then
+        p.default = options.default
+    end if
+    return p
+end function
+
+// ---- FlagParameter ----
+// A boolean switch  -  e.g. -R, -f, --verbose
+// Returns true if the flag token is present, false otherwise.
+// Does NOT advance the index if the flag is absent.
+
+FlagParameter = {}
+FlagParameter.name     = null
+FlagParameter.required = false
+FlagParameter.flag     = null
+FlagParameter.type     = PARAMETER_TYPES.FLAG
+FlagParameter.handle = function(args, index)
+    if not args.hasIndex(index) then
+        return [false, index]
+    end if
+    if args[index] == self.flag then
+        return [true, index + 1]
+    end if
+    return [false, index]
+end function
+FlagParameter.New = function(options)
+    p = new FlagParameter
+    if not options.hasIndex(""name"") then
+        return Error.New(""Parameter requires a name"", ""MISSING_PARAM"")
+    end if
+    if not options.hasIndex(""flag"") then
+        return Error.New(""FlagParameter requires a flag value"", ""MISSING_PARAM"")
+    end if
+    p.name = options.name
+    p.flag = options.flag
+    return p
+end function
+
+// ---- OptionsParameter ----
+// An enum  -  only accepts values from a predefined set.
+
+OptionsParameter = {}
+OptionsParameter.name     = null
+OptionsParameter.required = false
+OptionsParameter.default  = null
+OptionsParameter.options  = {}
+OptionsParameter.type     = PARAMETER_TYPES.OPTIONS
+OptionsParameter.handle = function(args, index)
+    if not args.hasIndex(index) then
+        if self.required then
+            return Error.New(""Missing required parameter: "" + self.name, ""MISSING_PARAM"")
+        end if
+        return [self.default, index + 1]
+    end if
+    arg = args[index]
+    if not self.options.hasIndex(arg) then
+        return Error.New(""Invalid option '"" + arg + ""' for "" + self.name, ""INVALID_OPTION"")
+    end if
+    return [self.options[arg], index + 1]
+end function
+OptionsParameter.New = function(options)
+    p = new OptionsParameter
+    if not options.hasIndex(""name"") then
+        return Error.New(""Parameter requires a name"", ""MISSING_PARAM"")
+    end if
+    if not options.hasIndex(""options"") then
+        return Error.New(""OptionsParameter requires an options map"", ""MISSING_PARAM"")
+    end if
+    p.name     = options.name
+    p.required = options.hasIndex(""required"") and options.required
+    p.options  = options.options
+    p.default  = null
+    if options.hasIndex(""default"") then
+        p.default = options.default
+    end if
+    return p
+end function
+
+// ---- RestParameter ----
+// Captures all remaining arguments as a single joined string.
+// Always comes last in a parameter list.
+
+RestParameter = {}
+RestParameter.name     = null
+RestParameter.required = false
+RestParameter.default  = null
+RestParameter.type     = PARAMETER_TYPES.REST
+RestParameter.handle = function(args, index)
+    if not args.hasIndex(index) then
+        if self.required then
+            return Error.New(""Missing required parameter: "" + self.name, ""MISSING_PARAM"")
+        end if
+        return [self.default, args.len]
+    end if
+    rest = args[index:]
+    return [rest.join("" ""), args.len]
+end function
+RestParameter.New = function(options)
+    p = new RestParameter
+    if not options.hasIndex(""name"") then
+        return Error.New(""Parameter requires a name"", ""MISSING_PARAM"")
+    end if
+    p.name     = options.name
+    p.required = options.hasIndex(""required"") and options.required
+    p.default  = null
+    if options.hasIndex(""default"") then
+        p.default = options.default
+    end if
+    return p
+end function
+
+// ============================================================
+// COMMAND
+// ============================================================
+
+Command = {}
+Command.name        = null
+Command.description = null
+Command.parameters  = []
+Command.callback    = null
+Command.permissions = {""object"": ""file"", ""privilege"": ""guest""}
+
+Command.execute = function(args, mediator)
+    parsed = self.parseArgs(args)
+    if parsed isa Error then
+        return parsed
+    end if
+    return self.callback(parsed, mediator)
+end function
+
+Command.parseArgs = function(args)
+    params = {}
+    tokens = args.split("" "")
+
+    // Strip empty tokens
+    clean = []
+    for t in tokens
+        if t.len > 0 then
+            clean.push(t)
+        end if
+    end for
+    tokens = clean
+
+    index = 0
+    for param in self.parameters
+        result = param.handle(tokens, index)
+        if result isa Error then
+            return result
+        end if
+        params[param.name] = result[0]
+        index = result[1]
+    end for
+    return params
+end function
+
+Command.help = function()
+    line = self.name + ""  ""
+    for param in self.parameters
+        if param.type == PARAMETER_TYPES.FLAG then
+            line = line + ""("" + param.flag + "") ""
+        else if param.required then
+            line = line + ""["" + param.name + ""] ""
+        else
+            line = line + ""("" + param.name + "") ""
+        end if
+    end for
+    line = line + "" -  "" + self.description
+    return line
+end function
+
+Command.New = function(options)
+    if not options.hasIndex(""name"") then
+        return Error.New(""Command requires a name"", ""MISSING_PARAM"")
+    end if
+    if not options.hasIndex(""callback"") then
+        return Error.New(""Command requires a callback"", ""MISSING_PARAM"")
+    end if
+    c = new Command
+    c.name        = options.name
+    c.description = """"
+    c.parameters  = []
+    c.permissions = {""object"": ""file"", ""privilege"": ""guest""}
+    if options.hasIndex(""description"") then
+        c.description = options.description
+    end if
+    if options.hasIndex(""parameters"")  then
+        c.parameters  = options.parameters
+    end if
+    if options.hasIndex(""permissions"") then
+        c.permissions = {""object"": ""file"", ""privilege"": ""guest""} + options.permissions
+    end if
+    c.callback = @options.callback
+    return c
+end function
+
+Command.Build = function(name, description, params, objPerm, privPerm, callback)
+    c = new Command
+    c.name        = name
+    c.description = description
+    c.parameters  = params
+    c.permissions = {}
+    c.permissions.object    = objPerm
+    c.permissions.privilege = privPerm
+    c.callback = @callback
+    return c
+end function
+",1)
+m("/Corvid/asriN/managers/command-manager.txt","// ============================================================
+// CORVID | managers/command/command-manager
+// Command registry, queue, history, alias resolution,
+// macro dispatch, and permission checking.
+// ============================================================
+
+CommandManager = {}
+CommandManager.mediator  = null
+CommandManager.commands  = {}
+CommandManager.aliases   = {}
+CommandManager.queue     = []
+CommandManager.history   = []
+
+CommandManager.register = function(command)
+    if command isa Error then
+        return command
+    end if
+    self.commands[command.name] = command
+end function
+
+CommandManager.unregister = function(name)
+    if self.commands.hasIndex(name) then
+        self.commands.remove(name)
+    end if
+end function
+
+CommandManager.getCommand = function(name)
+    if not self.commands.hasIndex(name) or self.commands[name] == null then
+        return Error.New(""Unknown command: "" + name, ""UNKNOWN_COMMAND"")
+    end if
+    return self.commands[name]
+end function
+
+CommandManager.execute = function(input)
+    input = input.trim
+    if input.len == 0 then
+        return
+    end if
+
+    // Resolve alias
+    parts   = input.split("" "")
+    cmdName = parts[0]
+    argParts = parts[1:]
+    args    = argParts.join("" "")
+
+    if self.aliases.hasIndex(cmdName) then
+        aliasVal  = self.aliases[cmdName]
+        aliasParts = aliasVal.split("" "")
+        cmdName   = aliasParts[0]
+        aliasArgParts = aliasParts[1:]
+    aliasArgs = aliasArgParts.join("" "")
+        if aliasArgs.len > 0 then
+            args = aliasArgs + "" "" + args
+        end if
+    end if
+
+    // Macro dispatch via @macroname
+    if cmdName.indexOf(""@"") == 0 then
+        macroManager = self.mediator.getExtension(""macroManager"")
+        if macroManager != null then
+            return macroManager.runMacro(cmdName[1:])
+        end if
+        return Error.New(""No macro manager available"", ""NO_MACRO_MANAGER"")
+    end if
+
+    command = self.getCommand(cmdName)
+    if command isa Error then
+        self.queue.push(command)
+        return
+    end if
+
+    self.queue.push([command, args])
+end function
+
+CommandManager.run = function()
+    while self.queue.len > 0
+        item = self.queue.pull()
+        if item isa Error then
+            self.printResult(item)
+            self.queue = []
+            return
+        end if
+
+        // Check permissions
+        permCheck = self.checkPermissions(item[0])
+        if permCheck isa Error then
+            self.printResult(permCheck)
+            return
+        end if
+
+        // Execute
+        self.history.insert(0, item)
+        cmd = item[0]
+    result = cmd.execute(item[1], self.mediator)
+        self.printResult(result)
+    end while
+end function
+
+CommandManager.checkPermissions = function(command)
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    if sessionManager == null then
+        return
+    end if
+    session  = sessionManager.currentSession
+    if session == null then
+        return
+    end if
+    handler  = session.handler
+    objType  = handler.type()
+    priv     = handler.privilege()
+
+    if not self.checkObject(objType, command.permissions.object) then
+        return Error.New(""This command requires "" + command.permissions.object + "" access"", ""PERMISSION_DENIED"")
+    end if
+    if not self.checkPrivilege(priv, command.permissions.privilege) then
+        return Error.New(""This command requires "" + command.permissions.privilege + "" privilege"", ""PERMISSION_DENIED"")
+    end if
+end function
+
+CommandManager.checkObject = function(current, required)
+    if required == null or required == ""file""     then
+        return true
+    end if
+    if required == ""computer"" then
+        return current == ""computer"" or current == ""shell""
+    end if
+    if required == ""shell"" then
+        return current == ""shell""
+    end if
+    return false
+end function
+
+CommandManager.checkPrivilege = function(current, required)
+    if required == null or required == ""guest""  then
+        return true
+    end if
+    if current == ""unknown"" then
+        return true
+    end if
+    if required == ""user""   then
+        return current == ""root"" or current == ""user""
+    end if
+    if required == ""root""   then
+        return current == ""root""
+    end if
+    return false
+end function
+
+CommandManager.printResult = function(result)
+    if result == null then
+        return
+    end if
+    if result isa Error then
+        ui = self.mediator.getExtension(""corvidUi"")
+        if ui != null then
+            ui.error(result.message)
+        else
+            // Use basic red for error when UI system not available
+            print(""<color=#FF0000>[!] "" + result.message + ""</color>"")
+        end if
+        return
+    end if
+    if typeof(result) == ""string"" then
+        print(result)
+    end if
+end function
+
+CommandManager.addAlias = function(alias, target)
+    self.aliases[alias] = target
+end function
+
+CommandManager.removeAlias = function(alias)
+    if self.aliases.hasIndex(alias) then
+        self.aliases.remove(alias)
+    end if
+end function
+
+CommandManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+CommandManager.New = function()
+    result = new CommandManager
+    result.commands = {}
+    result.aliases  = {}
+    result.queue    = []
+    result.history  = []
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/session/file-session.txt","// ============================================================
+// CORVID | managers/session/file-session
+// Base session type. Provides virtual filesystem navigation
+// relative to a root and current directory. All higher
+// session types (computer, shell) extend this.
+// ============================================================
+
+FileSession = {}
+FileSession.root    = null
+FileSession.current = null
+FileSession.user    = ""unknown""
+
+FileSession.getFile = function(path)
+    if path == null or path.len == 0 then
+        return self.current
+    end if
+
+    startingPoint = self.current
+    parts         = path.split(""/"")
+
+    if startsWith(path, ""/"") then
+        startingPoint = self.root
+        parts = parts[1:]
+    end if
+
+    for part in parts
+        if part == "".."" then
+            parent = startingPoint.parent()
+            if parent isa Error then
+                return Error.New(""Cannot go above root"", ""AT_ROOT"")
+            end if
+            startingPoint = parent
+        else if part == ""."" or part.len == 0 then
+            continue
+        else
+            child = startingPoint.child(part)
+            if child isa Error then
+                return Error.New(""Not found: "" + path, ""NOT_FOUND"")
+            end if
+            startingPoint = child
+        end if
+    end for
+
+    return startingPoint
+end function
+
+FileSession.goTo = function(path)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    if target.type() == FILE_TYPES.FILE then
+        return Error.New(""Cannot cd into a file"", ""TYPE_ERROR"")
+    end if
+    self.current = target
+end function
+
+FileSession.path = function()
+    return self.current.path()
+end function
+
+FileSession.copy = function(srcPath, destPath)
+    src = self.getFile(srcPath)
+    if src isa Error then
+        return src
+    end if
+    dest     = self.getFile(destPath)
+    destName = src.name()
+    if dest isa Error then
+        destName = destPath.split(""/"").pop()
+        parentPath = parent_path(destPath)
+        dest = self.getFile(parentPath)
+        if dest isa Error then
+            return dest
+        end if
+    end if
+    return src.copy(dest.path(), destName)
+end function
+
+FileSession.move = function(srcPath, destPath)
+    src = self.getFile(srcPath)
+    if src isa Error then
+        return src
+    end if
+    dest     = self.getFile(destPath)
+    destName = src.name()
+    if dest isa Error or dest.type() == FILE_TYPES.FILE then
+        destName = destPath.split(""/"").pop()
+        parentPath = parent_path(destPath)
+        dest = self.getFile(parentPath)
+        if dest isa Error then
+            return dest
+        end if
+    end if
+    return src.move(dest.path(), destName)
+end function
+
+FileSession.delete = function(path)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    // If deleting current dir, move up first
+    if startsWith(self.current.path(), target.path()) then
+        self.current = target.parent()
+    end if
+    return target.delete()
+end function
+
+FileSession.setPermissions = function(path, perms, recursive)
+    if recursive == null then
+        recursive = false
+    end if
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.setPermissions(perms, recursive)
+end function
+
+FileSession.setOwner = function(path, owner, recursive)
+    if recursive == null then
+        recursive = false
+    end if
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.setOwner(owner, recursive)
+end function
+
+FileSession.setGroup = function(path, group, recursive)
+    if recursive == null then
+        recursive = false
+    end if
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.setGroup(group, recursive)
+end function
+
+FileSession.content = function(path)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.content()
+end function
+
+FileSession.setContent = function(path, content)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.setContent(content)
+end function
+
+FileSession.appendContent = function(path, content)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.appendContent(content)
+end function
+
+FileSession.rename = function(path, newName)
+    target = self.getFile(path)
+    if target isa Error then
+        return target
+    end if
+    return target.rename(newName)
+end function
+
+FileSession.name = function()
+    // File sessions have no hostname - return path as identifier
+    if self.current != null then
+        return self.current.path()
+    end if
+    return ""file-session""
+end function
+
+FileSession.privilege = function()
+    if self.user == ""root""  then
+        return ""root""
+    end if
+    if self.user == ""guest"" then
+        return ""guest""
+    end if
+    if self.user == ""unknown"" then
+        return ""unknown""
+    end if
+    return ""user""
+end function
+
+FileSession.type = function()
+    return ""file""
+end function
+
+FileSession.New = function(file)
+    result = new FileSession
+    result.root    = climbFileToRoot(file)
+    result.current = file
+    result.user    = getUserFromHandler(result)
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/session/computer-session.txt","// ============================================================
+// CORVID | managers/session/computer-session
+// Extends FileSession with computer-specific operations:
+// user management, process control, file creation.
+// ============================================================
+
+ComputerSession = new FileSession
+
+ComputerSession.computer = null
+
+ComputerSession.ip = function()
+    result = {}
+    result.public = self.computer.computer.public_ip
+    result.local  = self.computer.lanIp()
+    return result
+end function
+
+ComputerSession.name = function()
+    return self.computer.name()
+end function
+
+ComputerSession.getFile = function(path)
+    if path == null or path.len == 0 then
+        return self.current
+    end if
+    // Absolute path - try computer.File() first
+    if startsWith(path, ""/"") then
+        raw = self.computer.getFile(path)
+        if not (raw isa Error) then
+            return raw
+        end if
+    end if
+    // Relative path - traverse manually
+    startingPoint = self.current
+    parts = path.split(""/"")
+    if startsWith(path, ""/"") then
+        startingPoint = self.root
+        parts = parts[1:]
+    end if
+    for part in parts
+        if part == "".."" then
+            parent = startingPoint.parent()
+            if parent isa Error then
+                return Error.New(""Cannot go above root"", ""AT_ROOT"")
+            end if
+            startingPoint = parent
+        else if part == ""."" or part.len == 0 then
+            continue
+        else
+            child = startingPoint.child(part)
+            if child isa Error then
+                return Error.New(""Not found: "" + path, ""NOT_FOUND"")
+            end if
+            startingPoint = child
+        end if
+    end for
+    return startingPoint
+end function
+
+ComputerSession.createFolder = function(path)
+    parts  = path.split(""/"")
+    name   = parts.pop()
+    parent = self.getFile(parts.join(""/""))
+    if parent isa Error then
+        return parent
+    end if
+    return self.computer.createFolder(parent.path(), name)
+end function
+
+ComputerSession.createFile = function(path)
+    parts  = path.split(""/"")
+    name   = parts.pop()
+    parent = self.getFile(parts.join(""/""))
+    if parent isa Error then
+        return parent
+    end if
+    return self.computer.touch(parent.path(), name)
+end function
+
+ComputerSession.addUser = function(user, password)
+    return self.computer.addUser(user, password)
+end function
+
+ComputerSession.deleteUser = function(user)
+    return self.computer.deleteUser(user)
+end function
+
+ComputerSession.changePassword = function(user, password)
+    return self.computer.changePassword(user, password)
+end function
+
+ComputerSession.showProcs = function()
+    return self.computer.showProcs()
+end function
+
+ComputerSession.closeProcess = function(pid)
+    return self.computer.closeProcess(pid)
+end function
+
+ComputerSession.getPorts = function()
+    return self.computer.getPorts()
+end function
+
+ComputerSession.hasActiveUsers = function()
+    procs = self.computer.showProcs()
+    if procs isa Error then
+        return false
+    end if
+    for proc in procs
+        if proc.hasIndex(""COMMAND"") then
+            if proc.COMMAND == ""dsession"" then
+                return true
+            end if
+        end if
+    end for
+    return false
+end function
+
+ComputerSession.type = function()
+    return ""computer""
+end function
+
+ComputerSession.New = function(computer)
+    result        = new ComputerSession
+    result.computer = computer
+    rootFile      = computer.getFile(""/"")
+    if rootFile isa Error then
+        result.root    = null
+        result.current = null
+    else
+        result.root    = climbFileToRoot(rootFile)
+        result.current = rootFile
+    end if
+    result.user = getUserFromHandler(result)
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/session/shell-session.txt","// ============================================================
+// CORVID | managers/session/shell-session
+// Extends ComputerSession with shell-specific operations:
+// SSH connections, file transfer, build, launch, activate.
+// ============================================================
+
+ShellSession = new ComputerSession
+
+ShellSession.shell = null
+
+ShellSession.connectTo = function(ip, port, user, pass, service)
+    if service == null then
+        service = ""ssh""
+    end if
+    newShell = self.shell.connectTo(ip, port, user, pass, service)
+    if newShell isa Error then
+        return newShell
+    end if
+    return ShellSession.New(newShell)
+end function
+
+ShellSession.transferFileFrom = function(srcPath, destFolder, otherSession)
+    // Pull a file FROM otherSession TO this session
+    srcFile = otherSession.getFile(srcPath)
+    if srcFile isa Error then
+        return srcFile
+    end if
+    destDir = self.getFile(destFolder)
+    if destDir isa Error then
+        return destDir
+    end if
+    return otherSession.shell.transferFile(srcFile.path(), destDir.path(), self.shell)
+end function
+
+ShellSession.transferFileTo = function(srcPath, destFolder, otherSession)
+    // Push a file FROM this session TO otherSession
+    srcFile = self.getFile(srcPath)
+    if srcFile isa Error then
+        return srcFile
+    end if
+    destDir = otherSession.getFile(destFolder)
+    if destDir isa Error then
+        return destDir
+    end if
+    return self.shell.transferFile(srcFile.path(), destDir.path(), otherSession.shell)
+end function
+
+ShellSession.launch = function(path, args)
+    file = self.getFile(path)
+    if file isa Error then
+        return file
+    end if
+    return self.shell.launch(file.path(), args)
+end function
+
+ShellSession.build = function(srcPath, destPath)
+    srcFile = self.getFile(srcPath)
+    if srcFile isa Error then
+        return srcFile
+    end if
+    return self.shell.build(srcFile.path(), destPath)
+end function
+
+ShellSession.activate = function()
+    self.shell.activate()
+end function
+
+ShellSession.corruptLogs = function()
+    // Create a fresh empty file then move it onto system.log, atomically
+    // replacing the log content. This is more reliable than set_content("""")
+    // or delete+recreate since the move overwrites the existing file in place.
+    rawComp = self.shell.shell.host_computer
+    logFile = rawComp.File(""/var/system.log"")
+    if logFile == null then
+        return ""Log does not exist - nothing to wipe.""
+    end if
+    rawComp.touch(""/var"", ""t"")
+    emptyFile = rawComp.File(""/var/t"")
+    if emptyFile == null then
+        return Error.New(""Could not create temp file - need root access"", ""WIPE_FAILED"")
+    end if
+    moveResult = emptyFile.move(""/var"", ""system.log"")
+    if moveResult != 1 then
+        emptyFile.delete()
+        return Error.New(""Could not replace system.log"", ""WIPE_FAILED"")
+    end if
+    return ""Log wiped.""
+end function
+
+ShellSession.type = function()
+    return ""shell""
+end function
+
+ShellSession.New = function(shell)
+    result         = new ShellSession
+    result.shell   = shell
+    computer       = shell.getComputer()
+    if computer isa Error then
+        return computer
+    end if
+    result.computer = computer
+    rootFile        = computer.getFile(""/"")
+    if rootFile isa Error then
+        result.root    = null
+        result.current = null
+    else
+        result.root    = climbFileToRoot(rootFile)
+        result.current = rootFile
+    end if
+    result.user = getUserFromHandler(result)
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/session/session.txt","// ============================================================
+// CORVID | managers/session/session
+// Session factory  -  wraps any raw game object or facade
+// in the appropriate session type.
+// ============================================================
+
+Session = {}
+Session.handler = null
+Session.data    = {}
+Session.label   = """"
+
+Session.New = function(object, label)
+    // Already a session  -  return as-is
+    if object isa Session then
+        return object
+    end if
+
+    if label == null then
+        label = """"
+    end if
+
+    result         = new Session
+    result.data    = {}
+    result.label   = label
+
+    // Wrap raw game objects in facades first
+    if typeof(object) == ""shell"" then
+        wrapped = Shell.New(object)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        handler = ShellSession.New(wrapped)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler = handler
+        result.data.ip = handler.ip()
+        // Navigate to home directory
+        if handler.user == ""root"" then
+            handler.goTo(""/root"")
+        else if handler.user != ""unknown"" then
+            handler.goTo(""/home/"" + handler.user)
+        end if
+        return result
+    end if
+
+    if typeof(object) == ""computer"" then
+        wrapped = Computer.New(object)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        handler = ComputerSession.New(wrapped)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler = handler
+        result.data.ip = handler.ip()
+        if handler.user == ""root"" then
+            handler.goTo(""/root"")
+        else if handler.user != ""unknown"" then
+            handler.goTo(""/home/"" + handler.user)
+        end if
+        return result
+    end if
+
+    if typeof(object) == ""file"" then
+        wrapped = File.New(object)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        handler = FileSession.New(wrapped)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler  = handler
+        result.data.ip  = {""public"": ""unknown"", ""local"": ""unknown""}
+        return result
+    end if
+
+    // Shell facade
+    if object isa Shell then
+        handler = ShellSession.New(object)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler = handler
+        result.data.ip = handler.ip()
+        if handler.user == ""root"" then
+            handler.goTo(""/root"")
+        else if handler.user != ""unknown"" then
+            handler.goTo(""/home/"" + handler.user)
+        end if
+        return result
+    end if
+
+    // Computer facade
+    if object isa Computer then
+        handler = ComputerSession.New(object)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler = handler
+        result.data.ip = handler.ip()
+        if handler.user == ""root"" then
+            handler.goTo(""/root"")
+        else if handler.user != ""unknown"" then
+            handler.goTo(""/home/"" + handler.user)
+        end if
+        return result
+    end if
+
+    // File facade
+    if object isa File then
+        handler = FileSession.New(object)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler  = handler
+        result.data.ip  = {""public"": ""unknown"", ""local"": ""unknown""}
+        return result
+    end if
+
+    return Error.New(""Cannot create session from object of type: "" + typeof(object), ""TYPE_ERROR"")
+end function
+",1)
+m("/Corvid/asriN/managers/session/session-manager.txt","// ============================================================
+// CORVID | managers/session/session-manager
+// Manages all sessions. Maintains the session chain for
+// back navigation. Tracks current (operating) session and
+// pivot (home Nest) session separately.
+// ============================================================
+
+SessionManager = {}
+SessionManager.mediator      = null
+SessionManager.sessions      = []
+SessionManager.sessionChain  = []
+SessionManager.currentSession = null
+SessionManager.pivotSession   = null
+
+SessionManager.addSession = function(object, label)
+    session = Session.New(object, label)
+    if session isa Error then
+        return session
+    end if
+    self.sessions.push(session)
+
+    if self.currentSession == null then
+        self.currentSession = session
+        self.sessionChain.push(session)
+    end if
+    if self.pivotSession == null then
+        self.pivotSession = session
+    end if
+    return session
+end function
+
+SessionManager.setCurrentSession = function(indexOrSession)
+    if typeof(indexOrSession) == ""number"" then
+        if not self.sessions.hasIndex(indexOrSession) then
+            return Error.New(""Session index out of range: "" + indexOrSession, ""OUT_OF_RANGE"")
+        end if
+        session = self.sessions[indexOrSession]
+    else
+        session = indexOrSession
+    end if
+    self.currentSession = session
+    self.sessionChain.push(session)
+end function
+
+SessionManager.setPivotSession = function(indexOrSession)
+    if typeof(indexOrSession) == ""number"" then
+        if not self.sessions.hasIndex(indexOrSession) then
+            return Error.New(""Session index out of range: "" + indexOrSession, ""OUT_OF_RANGE"")
+        end if
+        self.pivotSession = self.sessions[indexOrSession]
+    else
+        self.pivotSession = indexOrSession
+    end if
+end function
+
+SessionManager.back = function()
+    if self.sessionChain.len <= 1 then
+        return Error.New(""Already at origin session"", ""AT_ORIGIN"")
+    end if
+    // Remove the session we are leaving from the sessions list too
+    leaving = self.sessionChain[self.sessionChain.len - 1]
+    leavingIdx = self.getSessionIndex(leaving)
+    self.sessionChain.pop()
+    self.currentSession = self.sessionChain[self.sessionChain.len - 1]
+    // Remove from sessions list if not session 0 (Nest)
+    if leavingIdx != null and leavingIdx > 0 then
+        self.sessions.remove(leavingIdx)
+    end if
+end function
+
+SessionManager.removeSession = function(index)
+    if not self.sessions.hasIndex(index) then
+        return Error.New(""Session index out of range: "" + index, ""OUT_OF_RANGE"")
+    end if
+    self.sessions.remove(index)
+end function
+
+SessionManager.getSessionIndex = function(session)
+    for i in range(0, self.sessions.len - 1)
+        if self.sessions[i] == session then
+            return i
+        end if
+    end for
+    return null
+end function
+
+SessionManager.listSessions = function()
+    return self.sessions
+end function
+
+SessionManager.removeSession = function(id)
+    if not self.sessions.hasIndex(id) then
+        return Error.New(""No session at index: "" + str(id), ""NOT_FOUND"")
+    end if
+    removedSession = self.sessions[id]
+    self.sessions.remove(id)
+    // If we removed the current session, fall back to previous in chain
+    if self.currentSession == removedSession then
+        if self.sessionChain.len > 0 then
+            self.currentSession = self.sessionChain[self.sessionChain.len - 1]
+        else
+            self.currentSession = self.pivotSession
+        end if
+    end if
+    // Clean session from chain if present
+    newChain = []
+    for sc in self.sessionChain
+        if sc != removedSession then
+            newChain.push(sc)
+        end if
+    end for
+    self.sessionChain = newChain
+    return true
+end function
+
+SessionManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+SessionManager.New = function()
+    result = new SessionManager
+    result.sessions      = []
+    result.sessionChain  = []
+    result.currentSession = null
+    result.pivotSession   = null
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/lib-manager.txt","// ============================================================
+// CORVID | managers/lib/lib-manager
+// Tracks all loaded metaxploit and crypto libraries.
+// Maintains current (active) and pivot (Nest) refs for each.
+// ============================================================
+
+LIB_TYPES = {}
+LIB_TYPES.METAXPLOIT = ""metaxploit""
+LIB_TYPES.CRYPTO     = ""crypto""
+
+// ---- Lib record ----
+
+Lib = {}
+Lib.lib     = null
+Lib.type    = ""unknown""
+Lib.data    = {}
+
+Lib.New = function(rawLib, data)
+    result      = new Lib
+    result.data = {}
+    result.data.ip      = {""public"": ""unknown"", ""local"": ""unknown""}
+    result.data.version = ""unknown""
+    result.data.path    = """"
+
+    if not data.hasIndex(""ip"") then
+        return Error.New(""Lib.New requires ip in data"", ""MISSING_PARAM"")
+    end if
+    result.data.ip = data.ip
+    if data.hasIndex(""path"")    then
+        result.data.path    = data.path
+    end if
+    if data.hasIndex(""version"") then
+        result.data.version = data.version
+    end if
+
+    if typeof(rawLib) == ""MetaxploitLib"" then
+        wrapped = Metaxploit.New(rawLib)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        result.lib  = wrapped
+        result.type = LIB_TYPES.METAXPLOIT
+    else if typeof(rawLib) == ""cryptoLib"" then
+        wrapped = Crypto.New(rawLib)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        result.lib  = wrapped
+        result.type = LIB_TYPES.CRYPTO
+    else
+        return Error.New(""Unknown library type: "" + typeof(rawLib), ""TYPE_ERROR"")
+    end if
+
+    return result
+end function
+
+// ---- LibManager ----
+
+LibManager = {}
+LibManager.mediator     = null
+LibManager.libs         = []
+LibManager.currentLibs  = {}
+LibManager.pivotLibs    = {}
+
+LibManager.addLib = function(rawLib, data)
+    lib = Lib.New(rawLib, data)
+    if lib isa Error then
+        return lib
+    end if
+
+    // If metaxploit, get version from the library itself
+    if lib.type == LIB_TYPES.METAXPLOIT and data.hasIndex(""path"") then
+        netSession = lib.lib.metaxploit.net_use
+        // Version extracted differently  -  store path for later use
+        lib.data.path = data.path
+    end if
+
+    self.libs.push(lib)
+
+    // Set as current and pivot if first of this type
+    if not self.currentLibs.hasIndex(lib.type) or self.currentLibs[lib.type] == null then
+        self.currentLibs[lib.type] = lib
+    end if
+    if not self.pivotLibs.hasIndex(lib.type) or self.pivotLibs[lib.type] == null then
+        self.pivotLibs[lib.type] = lib
+    end if
+
+    return lib
+end function
+
+LibManager.getCurrentLib = function(libType)
+    if not self.currentLibs.hasIndex(libType) then
+        return null
+    end if
+    return self.currentLibs[libType]
+end function
+
+LibManager.setCurrentLib = function(lib)
+    self.currentLibs[lib.type] = lib
+end function
+
+LibManager.getPivotLib = function(libType)
+    if not self.pivotLibs.hasIndex(libType) then
+        return null
+    end if
+    return self.pivotLibs[libType]
+end function
+
+LibManager.setPivotLib = function(libType, lib)
+    self.pivotLibs[libType] = lib
+end function
+
+LibManager.getLibById = function(index)
+    if not self.libs.hasIndex(index) then
+        return Error.New(""No lib at index: "" + index, ""NOT_FOUND"")
+    end if
+    return self.libs[index]
+end function
+
+LibManager.allLibs = function()
+    return self.libs
+end function
+
+LibManager.getMetaxploit = function()
+    lib = self.getCurrentLib(LIB_TYPES.METAXPLOIT)
+    if lib == null then
+        return Error.New(""No metaxploit library loaded"", ""NO_LIB"")
+    end if
+    return lib.lib
+end function
+
+LibManager.getCrypto = function()
+    lib = self.getCurrentLib(LIB_TYPES.CRYPTO)
+    if lib == null then
+        return Error.New(""No crypto library loaded"", ""NO_LIB"")
+    end if
+    return lib.lib
+end function
+
+LibManager.getPivotMetaxploit = function()
+    lib = self.getPivotLib(LIB_TYPES.METAXPLOIT)
+    if lib == null then
+        return Error.New(""No pivot metaxploit library loaded"", ""NO_LIB"")
+    end if
+    return lib.lib
+end function
+
+LibManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+LibManager.New = function()
+    result = new LibManager
+    result.libs        = []
+    result.currentLibs = {}
+    result.pivotLibs   = {}
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/metaxploit-manager.txt","// ============================================================
+// CORVID | managers/lib/metaxploit-manager
+// Orchestrates all metaxploit operations through the
+// lib-manager. Handles the hack workflow, rshell,
+// and net_use connections.
+// ============================================================
+
+MetaxploitManager = {}
+MetaxploitManager.mediator = null
+
+MetaxploitManager.getMetaxploit = function()
+    // When platform is active, use roost node metaxploit so exploit
+    // traffic originates from the roost node rather than Nest
+    platformManager = self.mediator.getExtension(""platformManager"")
+    if platformManager != null and platformManager.active then
+        roostMeta = platformManager.getMeta()
+        if roostMeta != null then
+            return roostMeta
+        end if
+    end if
+    libManager = self.mediator.getExtension(""libManager"")
+    meta = libManager.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta
+end function
+
+MetaxploitManager.getPivotMetaxploit = function()
+    libManager = self.mediator.getExtension(""libManager"")
+    meta = libManager.getPivotMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta
+end function
+
+MetaxploitManager.netUse = function(ip, port)
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta.netUse(ip, port)
+end function
+
+MetaxploitManager.getTargetLib = function(ip, port)
+    // Connect and dump the target library
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    session = meta.netUse(ip, port)
+    if session isa Error then
+        return session
+    end if
+    lib = session.dump_lib
+    if lib == null then
+        return Error.New(""dump_lib returned null for "" + ip + "":"" + port, ""DUMP_LIB_ERROR"")
+    end if
+    return lib
+end function
+
+MetaxploitManager.checkActiveUsers = function(ip, port)
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return false
+    end if
+    session = meta.netUse(ip, port)
+    if session isa Error then
+        return false
+    end if
+    if session.is_any_active_user == 1 then
+        if session.is_root_active_user == 1 then
+            return ""root""
+        end if
+        return ""user""
+    end if
+    return false
+end function
+
+MetaxploitManager.hack = function(ip, port)
+    // Full automated hack chain using pivot metaxploit
+    // 1. Get target lib via current metaxploit
+    // 2. Run hack via pivot metaxploit (where our .so lives)
+    // 3. Return structured results
+    currentMeta = self.getMetaxploit()
+    if currentMeta isa Error then
+        return currentMeta
+    end if
+    pivotMeta = self.getPivotMetaxploit()
+    if pivotMeta isa Error then
+        return pivotMeta
+    end if
+
+    session = currentMeta.netUse(ip, port)
+    if session isa Error then
+        return session
+    end if
+
+    targetLib = session.dump_lib
+    if targetLib == null then
+        return Error.New(""Could not get target library"", ""DUMP_LIB_ERROR"")
+    end if
+
+    // Get vulnerabilities using pivot metaxploit
+    vulns = pivotMeta.getVulnerabilities(targetLib)
+    if vulns isa Error then
+        return vulns
+    end if
+
+    // Test each exploit and collect results
+    results = []
+    for vuln in vulns
+        for exploit in vuln.exploits
+            // Fresh session for each attempt
+            freshSession = currentMeta.netUse(ip, port)
+            if freshSession isa Error then
+                continue
+            end if
+            freshLib = freshSession.dump_lib
+            if freshLib == null then
+                continue
+            end if
+
+            raw = freshLib.overflow(vuln.address, exploit)
+            if raw == null or typeof(raw) == ""number"" or typeof(raw) == ""string"" then
+                entry = {}
+                entry.address   = vuln.address
+                entry.exploit   = exploit
+                entry.rtype     = ""Failed""
+                entry.privilege = ""none""
+                results.push(entry)
+                continue
+            end if
+
+            rtype     = typeof(raw)
+            privilege = ""unknown""
+
+            if rtype == ""shell"" then
+                comp = raw.host_computer
+                privilege = self.detectPrivilege(comp)
+            else if rtype == ""computer"" then
+                privilege = self.detectPrivilege(raw)
+            else if rtype == ""file"" then
+                privilege = raw.path
+            end if
+
+            entry = {}
+            entry.address   = vuln.address
+            entry.exploit   = exploit
+            entry.rtype     = rtype
+            entry.privilege = privilege
+            entry.raw       = raw
+            results.push(entry)
+        end for
+    end for
+
+    if results.len == 0 then
+        return Error.New(""No exploits could be tested"", ""NO_RESULTS"")
+    end if
+
+    return results
+end function
+
+MetaxploitManager.detectPrivilege = function(computer)
+    rootFolder = computer.File(""/root"")
+    if rootFolder != null and rootFolder.has_permission(""w"") then
+        return ""root""
+    end if
+    homeFolder = computer.File(""/home"")
+    if homeFolder != null then
+        for userFolder in homeFolder.get_folders()
+            if userFolder.name == ""guest"" then
+                continue
+            end if
+            if userFolder.has_permission(""w"") then
+                return userFolder.name
+            end if
+        end for
+    end if
+    guestFolder = computer.File(""/home/guest"")
+    if guestFolder != null and guestFolder.has_permission(""w"") then
+        return ""guest""
+    end if
+    return ""unknown""
+end function
+
+MetaxploitManager.getBestResult = function(results)
+    // Priority: Shell root > Shell user > Computer root >
+    //           Computer user > Computer guest > File > Failed
+    for r in results
+        if r.rtype == ""shell"" and r.privilege == ""root"" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == ""shell"" and r.privilege != ""unknown"" and r.privilege != ""guest"" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == ""computer"" and r.privilege == ""root"" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == ""computer"" and r.privilege != ""unknown"" and r.privilege != ""guest"" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == ""computer"" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == ""file"" then
+            return r
+        end if
+    end for
+    return null
+end function
+
+MetaxploitManager.flockList = function()
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta.flockServer()
+end function
+
+MetaxploitManager.flockClient = function(ip, port, processName)
+    meta = self.getMetaxploit()
+    if meta isa Error then
+        return meta
+    end if
+    return meta.flockClient(ip, port, processName)
+end function
+
+MetaxploitManager.addLib = function(rawLib, data)
+    libManager = self.mediator.getExtension(""libManager"")
+    return libManager.addLib(rawLib, data)
+end function
+
+MetaxploitManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+MetaxploitManager.New = function()
+    result = new MetaxploitManager
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/database/database.txt","// ============================================================
+// CORVID | managers/database/database
+// Core database engine. Backed by JSON files on the Nest.
+// Provides generic read, write, upsert, query, delete.
+// Each database is a map keyed by record id.
+//
+// CHAINING:
+//   When a file exceeds SPLIT_THRESHOLD chars on save, it is
+//   closed with a {""__continued"": ""name_2.json""} marker and
+//   a new file is started. On load all files in the chain are
+//   merged into one in-memory map. Writes always go to the
+//   latest file (lazy strategy - stale copies in earlier files
+//   are overwritten on next load).
+//
+// OPTIMIZATIONS:
+//   - ipIndex: map of publicIp -> id for O(1) IP lookups
+//   - idCounter: tracks highest ID number to avoid full scan
+//   - dirty flag prevents redundant saves
+// ============================================================
+
+Database = {}
+Database.mediator     = null
+Database.name         = null
+Database.records      = {}
+Database.ipIndex      = {}
+Database.idCounter    = 0
+Database.dirty        = false
+Database.chainIndex   = 1      // current file number (1 = name.json, 2 = name_2.json...)
+Database.SPLIT_THRESHOLD = 140000
+
+Database.basePath = function()
+    return ""/Corvid/Data/"" + self.name + "".json""
+end function
+
+Database.chainPath = function(n)
+    if n == 1 then
+        return ""/Corvid/Data/"" + self.name + "".json""
+    end if
+    return ""/Corvid/Data/"" + self.name + ""_"" + str(n) + "".json""
+end function
+
+Database.rebuildIndex = function()
+    self.ipIndex   = {}
+    self.idCounter = 0
+    for kv in self.records
+        rec = kv.value
+        id  = kv.key
+        if rec.hasIndex(""public_ip"") and rec.public_ip.len > 0 then
+            self.ipIndex[rec.public_ip] = id
+        end if
+        if id.len > 2 then
+            num = id[2:].val
+            if num > self.idCounter then
+                self.idCounter = num
+            end if
+        end if
+    end for
+end function
+
+Database.load = function()
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler = sessionManager.pivotSession.handler
+
+    self.records   = {}
+    self.ipIndex   = {}
+    self.idCounter = 0
+    self.chainIndex = 1
+
+    // Follow the chain, merging all files into records
+    currentN = 1
+    while true
+        path = self.chainPath(currentN)
+        file = handler.getFile(path)
+        if file isa Error then
+            // No file at this index - stop (chainIndex stays at last good file)
+            if currentN > 1 then
+                self.chainIndex = currentN - 1
+            end if
+            break
+        end if
+        raw = file.content()
+        if raw isa Error or raw.len == 0 then
+            if currentN > 1 then
+                self.chainIndex = currentN - 1
+            end if
+            break
+        end if
+        parsed = parse(raw)
+        if parsed == null then
+            if currentN > 1 then
+                self.chainIndex = currentN - 1
+            end if
+            break
+        end if
+
+        // Check for continuation marker
+        nextFile = """"
+        if parsed.hasIndex(""__continued"") then
+            nextFile = parsed[""__continued""]
+            parsed.remove(""__continued"")
+        end if
+
+        // Merge records - later files overwrite earlier ones (lazy dedup)
+        for kv in parsed
+            if kv.key != ""__continued"" then
+                self.records[kv.key] = kv.value
+            end if
+        end for
+
+        if nextFile.len > 0 then
+            // Advance to next file in chain
+            currentN = currentN + 1
+        else
+            // This is the last file in the chain
+            self.chainIndex = currentN
+            break
+        end if
+    end while
+
+    self.rebuildIndex()
+end function
+
+Database.save = function()
+    if not self.dirty then
+        return
+    end if
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler = sessionManager.pivotSession.handler
+
+    // Collect all record keys (excluding any __continued sentinel)
+    allKeys = []
+    for kv in self.records
+        if kv.key != ""__continued"" then
+            allKeys.push(kv.key)
+        end if
+    end for
+
+    // Partition records into chunks that each fit within SPLIT_THRESHOLD.
+    // We always rewrite from file 1 so there are never stale records in
+    // earlier chain files from a previous session's split point.
+    // Use a running size estimate to avoid O(n^2) toJSON calls.
+    chunks = []
+    currentChunk = {}
+    currentSize = 2  // opening/closing braces of {}
+    for k in allKeys
+        recJson = toJSON(self.records[k])
+        // key + colon + value + comma + quotes = key.len + recJson.len + 4
+        entrySize = k.len + recJson.len + 4
+        // Keep 200 chars of headroom for the __continued marker
+        if currentSize + entrySize < self.SPLIT_THRESHOLD - 200 then
+            currentChunk[k] = self.records[k]
+            currentSize = currentSize + entrySize
+        else
+            chunks.push(currentChunk)
+            currentChunk = {}
+            currentChunk[k] = self.records[k]
+            currentSize = 2 + entrySize
+        end if
+    end for
+    if currentChunk.len > 0 then
+        chunks.push(currentChunk)
+    end if
+
+    if chunks.len == 0 then
+        // Empty database - write empty file
+        chunks.push({})
+    end if
+
+    // Write each chunk to its chain file.
+    // All but the last get a __continued pointer to the next file.
+    fileN = 1
+    for i in range(0, chunks.len - 1)
+        chunk = chunks[i]
+        path = self.chainPath(fileN)
+        if i < chunks.len - 1 then
+            chunk[""__continued""] = self.chainPath(fileN + 1)
+        end if
+        file = handler.getFile(path)
+        if file isa Error then
+            result = handler.createFile(path)
+            if result isa Error then
+                return result
+            end if
+            file = handler.getFile(path)
+            if file isa Error then
+                return file
+            end if
+        end if
+        file.setContent(toJSON(chunk))
+        fileN = fileN + 1
+    end for
+
+    // Delete any chain files beyond what we just wrote (left over from
+    // a previous session that had more chunks than we need now)
+    cleanN = fileN
+    cleanDone = false
+    while not cleanDone
+        cleanPath = self.chainPath(cleanN)
+        cleanFile = handler.getFile(cleanPath)
+        if cleanFile isa Error then
+            cleanDone = true
+        else
+            cleanFile.delete()
+            cleanN = cleanN + 1
+        end if
+    end while
+
+    self.chainIndex = fileN - 1
+    self.dirty = false
+end function
+
+Database.get = function(id)
+    if not self.records.hasIndex(id) then
+        return Error.New(""Record not found: "" + id, ""NOT_FOUND"")
+    end if
+    return self.records[id]
+end function
+
+Database.set = function(id, record)
+    if record.hasIndex(""public_ip"") and record.public_ip.len > 0 then
+        self.ipIndex[record.public_ip] = id
+    end if
+    self.records[id] = record
+    self.dirty = true
+end function
+
+Database.delete = function(id)
+    if not self.records.hasIndex(id) then
+        return Error.New(""Record not found: "" + id, ""NOT_FOUND"")
+    end if
+    rec = self.records[id]
+    if rec.hasIndex(""public_ip"") and self.ipIndex.hasIndex(rec.public_ip) then
+        self.ipIndex.remove(rec.public_ip)
+    end if
+    self.records.remove(id)
+    self.dirty = true
+end function
+
+Database.all = function()
+    result = []
+    for kv in self.records
+        if kv.key != ""__continued"" then
+            result.push(kv.value)
+        end if
+    end for
+    return result
+end function
+
+Database.query = function(matchFn)
+    result = []
+    for kv in self.records
+        if kv.key != ""__continued"" then
+            if matchFn(kv.value) then
+                result.push(kv.value)
+            end if
+        end if
+    end for
+    return result
+end function
+
+Database.findByIp = function(ip)
+    if not self.ipIndex.hasIndex(ip) then
+        return null
+    end if
+    id = self.ipIndex[ip]
+    if not self.records.hasIndex(id) then
+        return null
+    end if
+    return self.records[id]
+end function
+
+Database.upsert = function(id, record)
+    if self.records.hasIndex(id) then
+        existing = self.records[id]
+        for kv in record
+            existing[kv.key] = kv.value
+        end for
+        self.set(id, existing)
+    else
+        record.id = id
+        self.set(id, record)
+    end if
+    self.dirty = true
+end function
+
+Database.nextId = function(prefix)
+    self.idCounter = self.idCounter + 1
+    next = str(self.idCounter)
+    while next.len < 3
+        next = ""0"" + next
+    end while
+    return prefix + ""_"" + next
+end function
+
+Database.count = function()
+    return self.records.len
+end function
+
+Database.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+Database.New = function(name)
+    result = new Database
+    result.name         = name
+    result.records      = {}
+    result.ipIndex      = {}
+    result.idCounter    = 0
+    result.dirty        = false
+    result.chainIndex   = 1
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/database/person-db.txt","// ============================================================
+// CORVID | managers/database/person-db
+// Person record schema and operations.
+// A person is anyone whose identity has been discovered  - 
+// from whois, mail files, or social engineering.
+//
+// Schema:
+//   id        string    -  auto-generated e.g. ""p_001""
+//   name      string    -  full name
+//   email     string    -  primary email address
+//   org_id    string    -  linked organisation ID
+//   ips       list      -  known public IPs
+//   lan_ips   list      -  known LAN IPs
+//   notes     string    -  freeform notes
+//   source    string    -  how discovered: whois | mail | manual
+// ============================================================
+
+PersonDb = {}
+PersonDb.db = null
+
+PersonDb.findByEmail = function(email)
+    matchEmail = function(record)
+        return record.hasIndex(""email"") and record.email == email
+    end function
+    return self.db.query(@matchEmail)
+end function
+
+PersonDb.findByName = function(name)
+    matchName = function(record)
+        return record.hasIndex(""name"") and record.name.indexOf(name) != null
+    end function
+    return self.db.query(@matchName)
+end function
+
+PersonDb.findByIp = function(ip)
+    matchIp = function(record)
+        if record.hasIndex(""ips"") and record.ips.indexOf(ip) != null then
+            return true
+        end if
+        if record.hasIndex(""lan_ips"") and record.lan_ips.indexOf(ip) != null then
+            return true
+        end if
+        return false
+    end function
+    return self.db.query(@matchIp)
+end function
+
+PersonDb.findByOrg = function(orgId)
+    matchOrg = function(record)
+        return record.hasIndex(""org_id"") and record.org_id == orgId
+    end function
+    return self.db.query(@matchOrg)
+end function
+
+PersonDb.search = function(term)
+    // Broad search across name, email, notes
+    term = lower(term)
+    matchAny = function(record)
+        if record.hasIndex(""name"")  and record.lower(name).indexOf(term)  != null then
+            return true
+        end if
+        if record.hasIndex(""email"") and record.lower(email).indexOf(term) != null then
+            return true
+        end if
+        if record.hasIndex(""notes"") and record.lower(notes).indexOf(term) != null then
+            return true
+        end if
+        return false
+    end function
+    return self.db.query(@matchAny)
+end function
+
+PersonDb.upsert = function(data)
+    // Upsert by email  -  email is the natural key for a person
+    if not data.hasIndex(""email"") or data.email.len == 0 then
+        return Error.New(""Person record requires an email address"", ""VALIDATION_ERROR"")
+    end if
+    existing = self.findByEmail(data.email)
+    if existing.len > 0 then
+        record = existing[0]
+        id     = record.id
+        // Merge IPs
+        if data.hasIndex(""ips"") then
+            for ip in data.ips
+                if record.ips.indexOf(ip) == null then
+                    record.ips.push(ip)
+                end if
+            end for
+        end if
+        if data.hasIndex(""lan_ips"") then
+            for ip in data.lan_ips
+                if record.lan_ips.indexOf(ip) == null then
+                    record.lan_ips.push(ip)
+                end if
+            end for
+        end if
+        // Update scalar fields if provided and non-empty
+        if data.hasIndex(""name"")   and data.name.len   > 0 then
+            record.name   = data.name
+        end if
+        if data.hasIndex(""org_id"") and data.org_id.len > 0 then
+            record.org_id = data.org_id
+        end if
+        if data.hasIndex(""notes"")  and data.notes.len  > 0 then
+            record.notes  = data.notes
+        end if
+        self.db.set(id, record)
+        return id
+    else
+        id = self.db.nextId(""p"")
+        record = {}
+        record.id      = id
+        record.name    = """"
+        record.email   = data.email
+        record.org_id  = """"
+        record.ips     = []
+        record.lan_ips = []
+        record.notes   = """"
+        record.source  = ""unknown""
+        if data.hasIndex(""name"")    then
+            record.name    = data.name
+        end if
+        if data.hasIndex(""org_id"")  then
+            record.org_id  = data.org_id
+        end if
+        if data.hasIndex(""ips"")     then
+            record.ips     = data.ips
+        end if
+        if data.hasIndex(""lan_ips"") then
+            record.lan_ips = data.lan_ips
+        end if
+        if data.hasIndex(""notes"")   then
+            record.notes   = data.notes
+        end if
+        if data.hasIndex(""source"")  then
+            record.source  = data.source
+        end if
+        self.db.set(id, record)
+        return id
+    end if
+end function
+
+PersonDb.get = function(id)
+    return self.db.get(id)
+end function
+
+PersonDb.all = function()
+    return self.db.all()
+end function
+
+PersonDb.addNote = function(id, note)
+    record = self.db.get(id)
+    if record isa Error then
+        return record
+    end if
+    if record.notes.len > 0 then
+        record.notes = record.notes + char(10) + note
+    else
+        record.notes = note
+    end if
+    self.db.set(id, record)
+end function
+
+PersonDb.New = function(db)
+    result    = new PersonDb
+    result.db = db
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/database/org-db.txt","// ============================================================
+// CORVID | managers/database/org-db
+// Organisation record schema and operations.
+// An org is any company or entity whose infrastructure
+// has been touched or identified.
+//
+// Schema:
+//   id      string    -  auto-generated e.g. ""o_001""
+//   name    string    -  company name
+//   domain  string    -  primary domain e.g. ""acme.net""
+//   ips     list      -  known public IPs
+//   notes   string    -  freeform notes
+// ============================================================
+
+OrgDb = {}
+OrgDb.db = null
+
+OrgDb.findByDomain = function(domain)
+    matchDomain = function(record)
+        return record.hasIndex(""domain"") and record.domain == domain
+    end function
+    return self.db.query(@matchDomain)
+end function
+
+OrgDb.findByName = function(name)
+    term = lower(name)
+    matchName = function(record)
+        return record.hasIndex(""name"") and record.lower(name).indexOf(term) != null
+    end function
+    return self.db.query(@matchName)
+end function
+
+OrgDb.findByIp = function(ip)
+    matchIp = function(record)
+        return record.hasIndex(""ips"") and record.ips.indexOf(ip) != null
+    end function
+    return self.db.query(@matchIp)
+end function
+
+OrgDb.search = function(term)
+    term = lower(term)
+    matchAny = function(record)
+        if record.hasIndex(""name"")   and record.lower(name).indexOf(term)   != null then
+            return true
+        end if
+        if record.hasIndex(""domain"") and record.lower(domain).indexOf(term) != null then
+            return true
+        end if
+        if record.hasIndex(""notes"")  and record.lower(notes).indexOf(term)  != null then
+            return true
+        end if
+        return false
+    end function
+    return self.db.query(@matchAny)
+end function
+
+OrgDb.upsert = function(data)
+    // Upsert by domain  -  domain is the natural key for an org
+    if not data.hasIndex(""domain"") or data.domain.len == 0 then
+        return Error.New(""Organisation record requires a domain"", ""VALIDATION_ERROR"")
+    end if
+    existing = self.findByDomain(data.domain)
+    if existing.len > 0 then
+        record = existing[0]
+        id     = record.id
+        if data.hasIndex(""ips"") then
+            for ip in data.ips
+                if record.ips.indexOf(ip) == null then
+                    record.ips.push(ip)
+                end if
+            end for
+        end if
+        if data.hasIndex(""name"")  and data.name.len  > 0 then
+            record.name  = data.name
+        end if
+        if data.hasIndex(""notes"") and data.notes.len > 0 then
+            record.notes = data.notes
+        end if
+        self.db.set(id, record)
+        return id
+    else
+        id = self.db.nextId(""o"")
+        record = {}
+        record.id     = id
+        record.name   = """"
+        record.domain = data.domain
+        record.ips    = []
+        record.notes  = """"
+        if data.hasIndex(""name"")  then
+            record.name  = data.name
+        end if
+        if data.hasIndex(""ips"")   then
+            record.ips   = data.ips
+        end if
+        if data.hasIndex(""notes"") then
+            record.notes = data.notes
+        end if
+        self.db.set(id, record)
+        return id
+    end if
+end function
+
+OrgDb.get = function(id)
+    return self.db.get(id)
+end function
+
+OrgDb.all = function()
+    return self.db.all()
+end function
+
+OrgDb.addNote = function(id, note)
+    record = self.db.get(id)
+    if record isa Error then
+        return record
+    end if
+    if record.notes.len > 0 then
+        record.notes = record.notes + char(10) + note
+    else
+        record.notes = note
+    end if
+    self.db.set(id, record)
+end function
+
+OrgDb.New = function(db)
+    result    = new OrgDb
+    result.db = db
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/database/credential-db.txt","// ============================================================
+// CORVID | managers/database/credential-db
+// Credential record schema and operations.
+// All credential types  -  system, mail, bank  -  unified
+// in one schema with a type field to distinguish them.
+//
+// Schema:
+//   id            string  -  auto-generated e.g. ""c_001""
+//   type          string  -  system | mail | bank
+//   username      string  -  login name or email address
+//   password      string  -  plaintext if cracked, else """"
+//   native_pass   string  -  original password before Corvid changed it
+//   hash          string  -  original hash from passwd/mail
+//   bank_number   string  -  bank account number (bank type)
+//   public_ip     string  -  source machine public IP
+//   lan_ip        string  -  source machine LAN IP
+//   org_id        string  -  linked organisation ID
+//   person_id     string  -  linked person ID
+//   source        string  -  native | exploit_generated | hardened | harvest_updated | mail | bounce
+// ============================================================
+
+CRED_TYPES = {}
+CRED_TYPES.SYSTEM = ""system""
+CRED_TYPES.MAIL   = ""mail""
+CRED_TYPES.BANK   = ""bank""
+
+CredentialDb = {}
+CredentialDb.db = null
+
+CredentialDb.findByUsername = function(username)
+    term = lower(username)
+    matchUser = function(record)
+        return record.hasIndex(""username"") and lower(record.username).indexOf(term) != null
+    end function
+    return self.db.query(@matchUser)
+end function
+
+CredentialDb.findByIp = function(ip)
+    // Credentials can have multiple per IP so we still scan
+    // but skip records where neither IP field matches early
+    result = []
+    for kv in self.db.records
+        rec = kv.value
+        if rec.hasIndex(""public_ip"") and rec.public_ip == ip then
+            result.push(rec)
+        else if rec.hasIndex(""lan_ip"") and rec.lan_ip == ip then
+            result.push(rec)
+        end if
+    end for
+    return result
+end function
+
+CredentialDb.findByType = function(credType)
+    matchType = function(record)
+        return record.hasIndex(""type"") and record.type == credType
+    end function
+    return self.db.query(@matchType)
+end function
+
+CredentialDb.findCracked = function()
+    matchCracked = function(record)
+        return record.hasIndex(""password"") and record.password.len > 0
+    end function
+    return self.db.query(@matchCracked)
+end function
+
+CredentialDb.findByOrg = function(orgId)
+    matchOrg = function(record)
+        return record.hasIndex(""org_id"") and record.org_id == orgId
+    end function
+    return self.db.query(@matchOrg)
+end function
+
+CredentialDb.search = function(term)
+    term = lower(term)
+    matchAny = function(record)
+        if record.hasIndex(""username"") and lower(record.username).indexOf(term) != null then
+            return true
+        end if
+        if record.hasIndex(""password"") and lower(record.password).indexOf(term) != null then
+            return true
+        end if
+        if record.hasIndex(""public_ip"") and record.public_ip.indexOf(term) != null then
+            return true
+        end if
+        return false
+    end function
+    return self.db.query(@matchAny)
+end function
+
+CredentialDb.upsert = function(data)
+    // Natural key: username + public_ip + type
+    if not data.hasIndex(""username"") then
+        return Error.New(""Credential requires a username"", ""VALIDATION_ERROR"")
+    end if
+    if not data.hasIndex(""type"") then
+        return Error.New(""Credential requires a type (system|mail|bank)"", ""VALIDATION_ERROR"")
+    end if
+
+    pubIp = """"
+    if data.hasIndex(""public_ip"") then
+        pubIp = data.public_ip
+    end if
+    credType = data.type
+    username = data.username
+
+    matchExisting = function(record)
+        if record.username != username then
+            return false
+        end if
+        if record.type     != credType then
+            return false
+        end if
+        if record.public_ip != pubIp   then
+            return false
+        end if
+        return true
+    end function
+
+    existing = self.db.query(@matchExisting)
+    if existing.len > 0 then
+        record = existing[0]
+        id     = record.id
+        incomingSource = """"
+        if data.hasIndex(""source"") then
+            incomingSource = data.source
+        end if
+
+        if data.hasIndex(""password"") and data.password.len > 0 then
+            incomingPass = data.password
+            existingPass = record.password
+
+            if incomingSource == ""exploit_generated"" or incomingSource == ""hardened"" then
+                // Preserve current password as native_pass before overwriting
+                // Only if we don't already have a native_pass saved
+                if not record.hasIndex(""native_pass"") or record.native_pass.len == 0 then
+                    record.native_pass = existingPass
+                end if
+                record.password = incomingPass
+                record.source   = incomingSource
+
+            else if incomingSource == ""native"" or incomingSource == ""harvest"" then
+                // Re-harvest: if password differs from stored, flag as updated
+                // but don't overwrite native_pass if already set
+                if existingPass.len > 0 and incomingPass != existingPass then
+                    // Password changed since last visit - keep native, note update
+                    if not record.hasIndex(""native_pass"") or record.native_pass.len == 0 then
+                        record.native_pass = existingPass
+                    end if
+                    record.password = incomingPass
+                    record.source   = ""harvest_updated""
+                else if existingPass.len == 0 then
+                    record.password = incomingPass
+                    if not record.hasIndex(""source"") or record.source.len == 0 or record.source == ""unknown"" then
+                        record.source = incomingSource
+                    end if
+                end if
+
+            else if incomingSource == ""routerattack"" or incomingSource == ""routerattack_passwd"" or incomingSource == ""routerattack_file"" then
+                // Router harvest - update password, preserving native if changed
+                if existingPass.len > 0 and incomingPass != existingPass then
+                    if not record.hasIndex(""native_pass"") or record.native_pass.len == 0 then
+                        record.native_pass = existingPass
+                    end if
+                end if
+                record.password = incomingPass
+                record.source   = incomingSource
+
+            else
+                // Generic update - just update if not already set
+                if existingPass.len == 0 then
+                    record.password = incomingPass
+                end if
+            end if
+        end if
+
+        if data.hasIndex(""hash"")        and data.hash.len        > 0 then
+            record.hash        = data.hash
+        end if
+        if data.hasIndex(""bank_number"") and data.bank_number.len > 0 then
+            record.bank_number = data.bank_number
+        end if
+        if data.hasIndex(""org_id"")      and data.org_id.len      > 0 then
+            record.org_id      = data.org_id
+        end if
+        if data.hasIndex(""person_id"")   and data.person_id.len   > 0 then
+            record.person_id   = data.person_id
+        end if
+        if data.hasIndex(""lan_ip"")      and data.lan_ip.len      > 0 then
+            record.lan_ip      = data.lan_ip
+        end if
+        self.db.set(id, record)
+        return id
+    else
+        id = self.db.nextId(""c"")
+        record = {}
+        record.id          = id
+        record.type        = data.type
+        record.username    = data.username
+        record.password    = """"
+        record.native_pass = """"
+        record.hash        = """"
+        record.bank_number = """"
+        record.public_ip   = """"
+        record.lan_ip      = """"
+        record.org_id      = """"
+        record.person_id   = """"
+        record.source      = ""native""
+        if data.hasIndex(""password"")    then
+            record.password    = data.password
+        end if
+        if data.hasIndex(""native_pass"") then
+            record.native_pass = data.native_pass
+        end if
+        if data.hasIndex(""hash"")        then
+            record.hash        = data.hash
+        end if
+        if data.hasIndex(""bank_number"") then
+            record.bank_number = data.bank_number
+        end if
+        if data.hasIndex(""public_ip"")   then
+            record.public_ip   = data.public_ip
+        end if
+        if data.hasIndex(""lan_ip"")      then
+            record.lan_ip      = data.lan_ip
+        end if
+        if data.hasIndex(""org_id"")      then
+            record.org_id      = data.org_id
+        end if
+        if data.hasIndex(""person_id"")   then
+            record.person_id   = data.person_id
+        end if
+        if data.hasIndex(""source"")      then
+            record.source      = data.source
+        end if
+        self.db.set(id, record)
+        return id
+    end if
+end function
+
+CredentialDb.get = function(id)
+    return self.db.get(id)
+end function
+
+CredentialDb.updateRecord = function(record)
+    // Direct update of a record by id - used by migration and targeted updates
+    if not record.hasIndex(""id"") then
+        return Error.New(""Record missing id field"", ""NO_ID"")
+    end if
+    self.db.set(record.id, record)
+    return record.id
+end function
+
+CredentialDb.all = function()
+    return self.db.all()
+end function
+
+CredentialDb.New = function(db)
+    result    = new CredentialDb
+    result.db = db
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/database/target-db.txt","// ============================================================
+// CORVID | managers/database/target-db
+// Target record schema and operations.
+// Every machine encountered  -  whether exploited or discovered.
+//
+// Schema:
+//   id          string    -  auto-generated e.g. ""t_001""
+//   public_ip   string    -  public IP address
+//   lan_ip      string    -  LAN IP address
+//   router_ip   string    -  router public IP
+//   hostname    string    -  machine name if known
+//   org_id      string    -  linked organisation ID
+//   privilege   string    -  highest privilege achieved
+//   status      string    -  unknown|scanned|exploited|owned|bounce
+//   ports       list      -  port records (see below)
+//   exploit_db  map       -  lib_key -> list of exploit records
+//   notes       string    -  freeform notes
+//   ssh_default bool      -  true if SSH was open natively (not installed by us)
+//
+// Port record:
+//   port       number
+//   service    string
+//   version    string
+//   forwarded  bool
+//   exploited  bool
+//
+// Exploit record:
+//   address    string    -  memory address
+//   exploit    string    -  overflow value
+//   rtype      string    -  Shell|Computer|File|Failed
+//   privilege  string    -  root|user|guest|unknown
+// ============================================================
+
+TARGET_STATUS = {}
+TARGET_STATUS.UNKNOWN   = ""unknown""
+TARGET_STATUS.SCANNED   = ""scanned""
+TARGET_STATUS.EXPLOITED = ""exploited""
+TARGET_STATUS.OWNED     = ""owned""
+TARGET_STATUS.BOUNCE    = ""bounce""
+
+TargetDb = {}
+TargetDb.db = null
+
+TargetDb.findByPublicIp = function(ip)
+    // Full scan by public_ip to return ALL records for this IP
+    // (ipIndex only holds one entry per IP so can't use it for multi-record networks)
+    matchIp = function(record)
+        return record.hasIndex(""public_ip"") and record.public_ip == ip
+    end function
+    return self.db.query(@matchIp)
+end function
+
+TargetDb.findByLanIp = function(ip)
+    matchIp = function(record)
+        return record.hasIndex(""lan_ip"") and record.lan_ip == ip
+    end function
+    return self.db.query(@matchIp)
+end function
+
+TargetDb.findByStatus = function(status)
+    matchStatus = function(record)
+        return record.hasIndex(""status"") and record.status == status
+    end function
+    return self.db.query(@matchStatus)
+end function
+
+TargetDb.findByOrg = function(orgId)
+    matchOrg = function(record)
+        return record.hasIndex(""org_id"") and record.org_id == orgId
+    end function
+    return self.db.query(@matchOrg)
+end function
+
+TargetDb.findBounces = function()
+    return self.findByStatus(TARGET_STATUS.BOUNCE)
+end function
+
+TargetDb.getExploits = function(id, libKey)
+    record = self.db.get(id)
+    if record isa Error then
+        return record
+    end if
+    if not record.hasIndex(""exploit_db"") then
+        return []
+    end if
+    if not record.exploit_db.hasIndex(libKey) then
+        return []
+    end if
+    return record.exploit_db[libKey]
+end function
+
+TargetDb.upsert = function(data)
+    // Natural key: public_ip + lan_ip
+    if not data.hasIndex(""public_ip"") then
+        return Error.New(""Target record requires public_ip"", ""VALIDATION_ERROR"")
+    end if
+
+    lanIp = """"
+    if data.hasIndex(""lan_ip"") then
+        lanIp = data.lan_ip
+    end if
+
+    matchExisting = function(record)
+        if record.public_ip != data.public_ip then
+            return false
+        end if
+        // Only enforce lan_ip match if BOTH have a lan_ip set
+        if lanIp.len > 0 and record.hasIndex(""lan_ip"") and record.lan_ip.len > 0 and record.lan_ip != lanIp then
+            return false
+        end if
+        return true
+    end function
+
+    existing = self.db.query(@matchExisting)
+    if existing.len > 0 then
+        record = existing[0]
+        id     = record.id
+        // Merge ports  -  avoid duplicates by port number
+        if data.hasIndex(""ports"") then
+            for newPort in data.ports
+                found = false
+                if record.ports.len > 0 then
+                    for i in range(0, record.ports.len - 1)
+                        if record.ports[i].port == newPort.port then
+                            record.ports[i] = newPort
+                            found = true
+                        end if
+                    end for
+                end if
+                if not found then
+                    record.ports.push(newPort)
+                end if
+            end for
+        end if
+        // Update scalar fields
+        if data.hasIndex(""hostname"")  and data.hostname.len  > 0 then
+            record.hostname  = data.hostname
+        end if
+        if data.hasIndex(""org_id"")    and data.org_id.len    > 0 then
+            record.org_id    = data.org_id
+        end if
+        if data.hasIndex(""router_ip"") and data.router_ip.len > 0 then
+            record.router_ip = data.router_ip
+        end if
+        if data.hasIndex(""notes"")     and data.notes.len     > 0 then
+            if record.notes.len > 0 then
+                record.notes = record.notes + char(10) + data.notes
+            else
+                record.notes = data.notes
+            end if
+        end if
+        // Status  -  only upgrade, never downgrade
+        statusOrder = [TARGET_STATUS.UNKNOWN, TARGET_STATUS.SCANNED, TARGET_STATUS.EXPLOITED, TARGET_STATUS.OWNED, TARGET_STATUS.BOUNCE]
+        if data.hasIndex(""status"") then
+            currentIdx = statusOrder.indexOf(record.status)
+            newIdx     = statusOrder.indexOf(data.status)
+            if newIdx == null then
+                newIdx = 0
+            end if
+            if currentIdx == null then
+                currentIdx = 0
+            end if
+            if newIdx > currentIdx then
+                record.status = data.status
+            end if
+        end if
+        // Privilege  -  only upgrade
+        privOrder = [""unknown"", ""guest"", ""user"", ""root""]
+        if data.hasIndex(""privilege"") then
+            currentPrivIdx = privOrder.indexOf(record.privilege)
+            newPrivIdx     = privOrder.indexOf(data.privilege)
+            if newPrivIdx == null then
+                newPrivIdx = 0
+            end if
+            if currentPrivIdx == null then
+                currentPrivIdx = 0
+            end if
+            if newPrivIdx > currentPrivIdx then
+                record.privilege = data.privilege
+            end if
+        end if
+        // Exploit DB  -  merge by lib key
+        if data.hasIndex(""exploit_db"") then
+            if not record.hasIndex(""exploit_db"") then
+                record.exploit_db = {}
+            end if
+            for kv in data.exploit_db
+                record.exploit_db[kv.key] = kv.value
+            end for
+        end if
+        // ssh_default  -  once true, stays true
+        if data.hasIndex(""ssh_default"") and data.ssh_default then
+            record.ssh_default = true
+        end if
+        self.db.set(id, record)
+        return id
+    else
+        id = self.db.nextId(""t"")
+        record = {}
+        record.id          = id
+        record.public_ip   = data.public_ip
+        record.lan_ip      = """"
+        record.router_ip   = """"
+        record.hostname    = """"
+        record.org_id      = """"
+        record.privilege   = ""unknown""
+        record.status      = TARGET_STATUS.UNKNOWN
+        record.ports       = []
+        record.exploit_db  = {}
+        record.notes       = """"
+        record.ssh_default = false
+        if data.hasIndex(""lan_ip"")      then
+            record.lan_ip      = data.lan_ip
+        end if
+        if data.hasIndex(""router_ip"")   then
+            record.router_ip   = data.router_ip
+        end if
+        if data.hasIndex(""hostname"")    then
+            record.hostname     = data.hostname
+        end if
+        if data.hasIndex(""org_id"")      then
+            record.org_id      = data.org_id
+        end if
+        if data.hasIndex(""privilege"")   then
+            record.privilege    = data.privilege
+        end if
+        if data.hasIndex(""status"")      then
+            record.status       = data.status
+        end if
+        if data.hasIndex(""ports"")       then
+            record.ports        = data.ports
+        end if
+        if data.hasIndex(""exploit_db"")  then
+            record.exploit_db   = data.exploit_db
+        end if
+        if data.hasIndex(""notes"")       then
+            record.notes        = data.notes
+        end if
+        if data.hasIndex(""ssh_default"") then
+            record.ssh_default  = data.ssh_default
+        end if
+        self.db.set(id, record)
+        return id
+    end if
+end function
+
+TargetDb.storeExploits = function(targetId, libKey, exploits)
+    // Store tested exploit results against a target by library key
+    record = self.db.get(targetId)
+    if record isa Error then
+        return record
+    end if
+    if not record.hasIndex(""exploit_db"") then
+        record.exploit_db = {}
+    end if
+    record.exploit_db[libKey] = exploits
+    self.db.set(targetId, record)
+end function
+
+TargetDb.setStatus = function(targetId, status)
+    record = self.db.get(targetId)
+    if record isa Error then
+        return record
+    end if
+    record.status = status
+    self.db.set(targetId, record)
+end function
+
+TargetDb.addNote = function(id, note)
+    record = self.db.get(id)
+    if record isa Error then
+        return record
+    end if
+    if record.notes.len > 0 then
+        record.notes = record.notes + char(10) + note
+    else
+        record.notes = note
+    end if
+    self.db.set(id, record)
+end function
+
+TargetDb.get = function(id)
+    return self.db.get(id)
+end function
+
+TargetDb.all = function()
+    return self.db.all()
+end function
+
+TargetDb.New = function(db)
+    result    = new TargetDb
+    result.db = db
+    return result
+end function
+",1)
+m("/Corvid/asriN/managers/database/database-manager.txt","// ============================================================
+// CORVID | managers/database/database-manager
+// Unified database access layer. Instantiates and owns all
+// four databases. All other managers query intelligence
+// exclusively through this manager.
+// ============================================================
+
+DatabaseManager = {}
+DatabaseManager.mediator    = null
+DatabaseManager.personDb    = null
+DatabaseManager.orgDb       = null
+DatabaseManager.credDb      = null
+DatabaseManager.targetDb    = null
+DatabaseManager.exploitKb   = null
+DatabaseManager.roostDb     = null
+DatabaseManager.snifferDb   = null
+
+DatabaseManager.init = function()
+    // Ensure /Corvid/Data/ exists on the Nest
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler = sessionManager.pivotSession.handler
+
+    corvid = handler.getFile(""/Corvid"")
+    if corvid isa Error then
+        result = handler.createFolder(""/Corvid"")
+        if result isa Error then
+            return result
+        end if
+    end if
+    data = handler.getFile(""/Corvid/Data"")
+    if data isa Error then
+        result = handler.createFolder(""/Corvid/Data"")
+        if result isa Error then
+            return result
+        end if
+    end if
+
+    // Instantiate raw databases
+    personsRaw = Database.New(""persons"")
+    personsRaw.setMediator(self.mediator)
+    personsRaw.load()
+
+    orgsRaw = Database.New(""orgs"")
+    orgsRaw.setMediator(self.mediator)
+    orgsRaw.load()
+
+    credsRaw = Database.New(""credentials"")
+    credsRaw.setMediator(self.mediator)
+    credsRaw.load()
+
+    targetsRaw = Database.New(""targets"")
+    targetsRaw.setMediator(self.mediator)
+    targetsRaw.load()
+
+    // Wrap in typed layers
+    self.personDb = PersonDb.New(personsRaw)
+    self.orgDb    = OrgDb.New(orgsRaw)
+    self.credDb   = CredentialDb.New(credsRaw)
+    self.targetDb = TargetDb.New(targetsRaw)
+
+    // Exploit knowledge base - separate file
+    self.exploitKb = ExploitKbManager.New()
+    self.exploitKb.setMediator(self.mediator)
+    self.exploitKb.init()
+
+    // Roost node pool - supports file chaining for large pools
+    self.roostDb = RoostDb
+    self.roostDb.setMediator(self.mediator)
+    self.roostDb.records = self.loadChainedList(""roost"", handler)
+
+    // Sniffer capture DB - supports file chaining for large capture sets
+    self.snifferDb = SnifferDb
+    self.snifferDb.setMediator(self.mediator)
+    snifferRecords = self.loadChainedList(""sniffer"", handler)
+    self.snifferDb.records = snifferRecords
+    if snifferRecords.len > 0 then
+        lastId = snifferRecords[snifferRecords.len - 1].id
+        numStr = lastId[3:]
+        self.snifferDb.nextId = numStr.val + 1
+    end if
+
+    // ShinyLibs DB
+    self.shinyLibsDb = ShinyLibsDb
+    self.shinyLibsDb.init()
+    shinyData = self.loadJson(""shinylibs"", handler)
+    if shinyData != null then
+        self.shinyLibsDb.deserialize(shinyData)
+    end if
+end function
+
+DatabaseManager.save = function()
+    // Save all dirty databases
+    results = []
+    r1 = self.personDb.db.save()
+    r2 = self.orgDb.db.save()
+    r3 = self.credDb.db.save()
+    r4 = self.targetDb.db.save()
+    r5 = self.exploitKb.save()
+    sessionManager = self.mediator.getExtension(""sessionManager"")
+    handler = sessionManager.pivotSession.handler
+    self.saveChainedList(""roost"", self.roostDb.records, handler)
+    self.saveChainedList(""sniffer"", self.snifferDb.records, handler)
+    self.saveJson(""shinylibs"", self.shinyLibsDb.serialize(), handler)
+    if r1 isa Error then
+        results.push(r1)
+    end if
+    if r2 isa Error then
+        results.push(r2)
+    end if
+    if r3 isa Error then
+        results.push(r3)
+    end if
+    if r4 isa Error then
+        results.push(r4)
+    end if
+    if r5 isa Error then
+        results.push(r5)
+    end if
+    if results.len > 0 then
+        return results[0]
+    end if
+end function
+
+// ---- Chained list persistence helpers ----
+// Used for roost and sniffer which store flat arrays rather than keyed maps.
+// Files: /Corvid/Data/<name>.json, /Corvid/Data/<name>_2.json, etc.
+// Each file is a JSON object: {""records"": [...], ""continued"": ""<next_path>""}
+// Always rewrites from file 1 to prevent stale records.
+
+DatabaseManager.listChainPath = function(name, n)
+    if n == 1 then
+        return ""/Corvid/Data/"" + name + "".json""
+    end if
+    return ""/Corvid/Data/"" + name + ""_"" + str(n) + "".json""
+end function
+
+// Simple JSON file load/save for non-chained single-file databases
+DatabaseManager.loadJson = function(name, handler)
+    filePath = ""/Corvid/Data/"" + name + "".json""
+    f = handler.getFile(filePath)
+    if f isa Error then
+        return null
+    end if
+    raw = f.content()
+    if raw == null or raw.len == 0 then
+        return null
+    end if
+    result = parse(raw)
+    if result == null then
+        return null
+    end if
+    return result
+end function
+
+DatabaseManager.saveJson = function(name, data, handler)
+    filePath = ""/Corvid/Data/"" + name + "".json""
+    encoded  = toJSON(data)
+    f = handler.getFile(filePath)
+    if f isa Error then
+        result = handler.createFile(filePath)
+        if result isa Error then
+            return result
+        end if
+        f = handler.getFile(filePath)
+        if f isa Error then
+            return f
+        end if
+    end if
+    f.setContent(encoded)
+end function
+
+DatabaseManager.loadChainedList = function(name, handler)
+    allRecords = []
+    currentN = 1
+    chainDone = false
+    while not chainDone
+        path = self.listChainPath(name, currentN)
+        file = handler.getFile(path)
+        if file isa Error then
+            chainDone = true
+        else
+            raw = file.content()
+            if raw isa Error or raw.len == 0 then
+                chainDone = true
+            else
+                parsed = parse(raw)
+                if parsed == null then
+                    chainDone = true
+                else
+                    // Support both old format (bare list) and new format (object with records key)
+                    if typeof(parsed) == ""list"" then
+                        for r in parsed
+                            allRecords.push(r)
+                        end for
+                        chainDone = true
+                    else if parsed.hasIndex(""records"") then
+                        for r in parsed.records
+                            allRecords.push(r)
+                        end for
+                        if parsed.hasIndex(""continued"") and parsed.continued.len > 0 then
+                            currentN = currentN + 1
+                        else
+                            chainDone = true
+                        end if
+                    else
+                        chainDone = true
+                    end if
+                end if
+            end if
+        end if
+    end while
+    return allRecords
+end function
+
+DatabaseManager.saveChainedList = function(name, records, handler)
+    THRESHOLD = 140000
+    // Partition records into chunks by running size estimate
+    chunks = []
+    currentChunk = []
+    currentSize = 2  // []
+    for r in records
+        entryJson = toJSON(r)
+        // comma + entry
+        entrySize = entryJson.len + 1
+        if currentSize + entrySize < THRESHOLD - 200 then
+            currentChunk.push(r)
+            currentSize = currentSize + entrySize
+        else
+            chunks.push(currentChunk)
+            currentChunk = [r]
+            currentSize = 2 + entryJson.len
+        end if
+    end for
+    if currentChunk.len > 0 then
+        chunks.push(currentChunk)
+    end if
+    if chunks.len == 0 then
+        chunks.push([])
+    end if
+
+    // Write each chunk - always from file 1
+    fileN = 1
+    for i in range(0, chunks.len - 1)
+        path = self.listChainPath(name, fileN)
+        fileObj = {}
+        fileObj.records = chunks[i]
+        if i < chunks.len - 1 then
+            fileObj.continued = self.listChainPath(name, fileN + 1)
+        else
+            fileObj.continued = """"
+        end if
+        file = handler.getFile(path)
+        if file isa Error then
+            handler.createFile(path)
+            file = handler.getFile(path)
+        end if
+        if not (file isa Error) then
+            file.setContent(toJSON(fileObj))
+        end if
+        fileN = fileN + 1
+    end for
+
+    // Delete any leftover chain files from previous larger saves
+    cleanN = fileN
+    cleanDone = false
+    while not cleanDone
+        cleanPath = self.listChainPath(name, cleanN)
+        cleanFile = handler.getFile(cleanPath)
+        if cleanFile isa Error then
+            cleanDone = true
+        else
+            cleanFile.delete()
+            cleanN = cleanN + 1
+        end if
+    end while
+end function
+
+// ---- Person operations ----
+
+DatabaseManager.upsertPerson = function(data)
+    return self.personDb.upsert(data)
+end function
+
+DatabaseManager.findPerson = function(term)
+    return self.personDb.search(term)
+end function
+
+DatabaseManager.findPersonByEmail = function(email)
+    return self.personDb.findByEmail(email)
+end function
+
+DatabaseManager.findPersonByIp = function(ip)
+    return self.personDb.findByIp(ip)
+end function
+
+DatabaseManager.allPersons = function()
+    return self.personDb.all()
+end function
+
+DatabaseManager.getPerson = function(id)
+    return self.personDb.get(id)
+end function
+
+// ---- Organisation operations ----
+
+DatabaseManager.upsertOrg = function(data)
+    return self.orgDb.upsert(data)
+end function
+
+DatabaseManager.findOrg = function(term)
+    return self.orgDb.search(term)
+end function
+
+DatabaseManager.findOrgByDomain = function(domain)
+    return self.orgDb.findByDomain(domain)
+end function
+
+DatabaseManager.findOrgByIp = function(ip)
+    return self.orgDb.findByIp(ip)
+end function
+
+DatabaseManager.allOrgs = function()
+    return self.orgDb.all()
+end function
+
+DatabaseManager.getOrg = function(id)
+    return self.orgDb.get(id)
+end function
+
+// ---- Credential operations ----
+
+DatabaseManager.upsertCredential = function(data)
+    return self.credDb.upsert(data)
+end function
+
+DatabaseManager.getExploitKb = function()
+    return self.exploitKb
+end function
+
+DatabaseManager.kbLookup = function(libName, libVersion)
+    return self.exploitKb.lookup(libName, libVersion)
+end function
+
+DatabaseManager.kbRecord = function(libName, libVersion, address, exploit, outcome, constraints, rtype, resultPath, privilege, blockedBy)
+    return self.exploitKb.record(libName, libVersion, address, exploit, outcome, constraints, rtype, resultPath, privilege, blockedBy)
+end function
+
+DatabaseManager.kbGetBest = function(libName, libVersion)
+    return self.exploitKb.getBestExploit(libName, libVersion)
+end function
+
+DatabaseManager.kbStats = function()
+    return self.exploitKb.stats()
+end function
+
+DatabaseManager.updateCredentialRecord = function(record)
+    return self.credDb.updateRecord(record)
+end function
+
+DatabaseManager.findCredentials = function(term)
+    return self.credDb.search(term)
+end function
+
+DatabaseManager.findCredentialsByIp = function(ip)
+    return self.credDb.findByIp(ip)
+end function
+
+DatabaseManager.findCredentialsByType = function(credType)
+    return self.credDb.findByType(credType)
+end function
+
+DatabaseManager.findCrackedCredentials = function()
+    return self.credDb.findCracked()
+end function
+
+DatabaseManager.allCredentials = function()
+    return self.credDb.all()
+end function
+
+// Helper: Find root system credentials for SSH access
+DatabaseManager.findRootSshCredentials = function(ip)
+    creds = self.findCredentialsByIp(ip)
+    result = {""password"": """", ""native_pass"": """"}
+    for cred in creds
+        if cred.type == CRED_TYPES.SYSTEM and cred.username == ""root"" then
+            if cred.password.len > 0 then
+                result.password = cred.password
+            end if
+            if cred.hasIndex(""native_pass"") and cred.native_pass.len > 0 then
+                result.native_pass = cred.native_pass
+            end if
+        end if
+    end for
+    return result
+end function
+
+// Helper: Extract all unique root passwords (current + native) for escalation
+DatabaseManager.extractRootPasswords = function(ip)
+    creds = self.findCredentialsByIp(ip)
+    passwords = []
+    for cred in creds
+        if cred.type == CRED_TYPES.SYSTEM and cred.username == ""root"" then
+            if cred.password.len > 0 and passwords.indexOf(cred.password) == null then
+                passwords.push(cred.password)
+            end if
+            if cred.hasIndex(""native_pass"") and cred.native_pass.len > 0 then
+                if passwords.indexOf(cred.native_pass) == null then
+                    passwords.push(cred.native_pass)
+                end if
+            end if
+        end if
+    end for
+    return passwords
+end function
+
+// Helper: Find specific user credentials by IP and username
+DatabaseManager.findUserCredentials = function(ip, username)
+    creds = self.findCredentialsByIp(ip)
+    result = []
+    for cred in creds
+        if cred.username == username then
+            result.push(cred)
+        end if
+    end for
+    return result
+end function
+
+// Helper: Find any system credential (prefers root, falls back to any system user)
+DatabaseManager.findAnySystemCredentials = function(ip)
+    creds = self.findCredentialsByIp(ip)
+    result = {""username"": """", ""password"": """"}
+    
+    // Pass 1: prefer root
+    for cred in creds
+        if cred.username == ""root"" and cred.password.len > 0 then
+            result.username = ""root""
+            result.password = cred.password
+            return result
+        end if
+        if cred.username == ""root"" and cred.hasIndex(""native_pass"") and cred.native_pass.len > 0 then
+            if result.password.len == 0 then
+                result.username = ""root""
+                result.password = cred.native_pass
+            end if
+        end if
+    end for
+    
+    // Pass 2: fall back to any system credential
+    if result.password.len == 0 then
+        for cred in creds
+            cType = """"
+            if cred.hasIndex(""type"") then
+                cType = cred.type
+            end if
+            if cType != ""system"" then
+                continue
+            end if
+            if cred.password.len > 0 then
+                result.username = cred.username
+                result.password = cred.password
+                break
+            end if
+            if cred.hasIndex(""native_pass"") and cred.native_pass.len > 0 then
+                result.username = cred.username
+                result.password = cred.native_pass
+                break
+            end if
+        end for
+    end if
+    
+    return result
+end function
+
+// ---- Target operations ----
+
+DatabaseManager.upsertTarget = function(data)
+    return self.targetDb.upsert(data)
+end function
+
+DatabaseManager.findTarget = function(ip)
+    results = self.targetDb.findByPublicIp(ip)
+    if results.len == 0 then
+        results = self.targetDb.findByLanIp(ip)
+    end if
+    return results
+end function
+
+DatabaseManager.findTargetsByStatus = function(status)
+    return self.targetDb.findByStatus(status)
+end function
+
+DatabaseManager.findBounces = function()
+    return self.targetDb.findBounces()
+end function
+
+DatabaseManager.allTargets = function()
+    return self.targetDb.all()
+end function
+
+DatabaseManager.getTarget = function(id)
+    return self.targetDb.get(id)
+end function
+
+DatabaseManager.storeExploits = function(targetId, libKey, exploits)
+    return self.targetDb.storeExploits(targetId, libKey, exploits)
+end function
+
+DatabaseManager.getExploits = function(targetId, libKey)
+    return self.targetDb.getExploits(targetId, libKey)
+end function
+
+DatabaseManager.setTargetStatus = function(targetId, status)
+    return self.targetDb.setStatus(targetId, status)
+end function
+
+// ---- Linking operations ----
+
+DatabaseManager.linkPersonToOrg = function(personId, orgId)
+    record = self.personDb.get(personId)
+    if record isa Error then
+        return record
+    end if
+    record.org_id = orgId
+    self.personDb.db.set(personId, record)
+end function
+
+DatabaseManager.linkCredentialToPerson = function(credId, personId)
+    record = self.credDb.get(credId)
+    if record isa Error then
+        return record
+    end if
+    record.person_id = personId
+    self.credDb.db.set(credId, record)
+end function
+
+DatabaseManager.addNote = function(collection, id, note)
+    if collection == ""person"" then
+        return self.personDb.addNote(id, note)
+    end if
+    if collection == ""org""    then
+        return self.orgDb.addNote(id, note)
+    end if
+    if collection == ""target"" then
+        return self.targetDb.addNote(id, note)
+    end if
+    return Error.New(""Unknown collection: "" + collection, ""UNKNOWN_COLLECTION"")
+end function
+
+// ---- Sniffer operations ----
+
+DatabaseManager.addSnifferCapture = function(raw, capturedFrom)
+    return self.snifferDb.add(raw, capturedFrom)
+end function
+
+DatabaseManager.getSnifferCapture = function(id)
+    return self.snifferDb.find(id)
+end function
+
+DatabaseManager.allSnifferCaptures = function()
+    return self.snifferDb.records
+end function
+
+DatabaseManager.removeSnifferCapture = function(id)
+    return self.snifferDb.remove(id)
+end function
+
+// ---- Stats ----
+
+DatabaseManager.stats = function()
+    result = {}
+    result.persons     = self.personDb.db.count()
+    result.orgs        = self.orgDb.db.count()
+    result.credentials = self.credDb.db.count()
+    result.targets     = self.targetDb.db.count()
+    result.sniffer     = self.snifferDb.records.len
+    return result
+end function
+
+DatabaseManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+DatabaseManager.New = function()
+    result = new DatabaseManager
+    result.personDb = null
+    result.orgDb    = null
+    result.credDb   = null
+    result.targetDb = null
+    return result
+end function
+",1)
