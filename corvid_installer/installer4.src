@@ -2221,7 +2221,8 @@ _cmd = new Command
 _cmd.name = ""bounces""
 _cmd.description = ""Bounce network management. Subcommands: update map chain verify wipe harden reset remove add revive restore""
 _cmd.parameters = [OptionsParameter.New({""name"": ""subcommand"", ""required"": true, ""options"": {""update"": ""update"", ""map"": ""map"", ""chain"": ""chain"", ""verify"": ""verify"", ""wipe"": ""wipe"", ""harden"": ""harden"", ""reset"": ""reset"", ""remove"": ""remove"", ""add"": ""add"", ""revive"": ""revive"", ""restore"": ""restore""}}), StringParameter.New({""name"": ""subcommand2"", ""required"": false, ""default"": """"})]
-_cmd.permissions = {}
+",1)
+m("/Corvid/asriN/commands_4.txt","_cmd.permissions = {}
 _cmd.permissions.object = ""file""
 _cmd.permissions.privilege = ""guest""
 _cmd.callback = function(params, mediator)
@@ -3454,4 +3455,88 @@ _cmd.callback = function(params, mediator)
     end if
 end function
 commandManager.register(_cmd)
-",1)
+
+// ── routerlibs ───────────────────────────────────────────────────────────────
+_cmd = new Command
+_cmd.name = ""routerlibs""
+_cmd.description = ""Manage router lib vault. Shows stored kernel_router.so files and vault paths. Subcommands: list, setpath""
+_cmd.parameters = [OptionsParameter.New({""name"": ""sub"", ""required"": false, ""options"": {""list"": ""list"", ""setpath"": ""setpath""}}), StringParameter.New({""name"": ""arg"", ""required"": false})]
+_cmd.permissions = {}
+_cmd.permissions.object = ""shell""
+_cmd.permissions.privilege = ""guest""
+_cmd.callback = function(params, mediator)
+    ui            = mediator.getExtension(""corvidUi"")
+    configManager = mediator.getExtension(""configManager"")
+    sessionManager = mediator.getExtension(""sessionManager"")
+    sub = params.sub
+
+    vulnPath   = configManager.get(""routerVulnLib"")
+    hardenPath = configManager.get(""routerHardenLib"")
+    if vulnPath isa Error then
+        vulnPath = ""/Corvid/Data/routerlibs/vuln""
+    end if
+    if hardenPath isa Error then
+        hardenPath = ""/Corvid/Data/routerlibs/harden""
+    end if
+
+    if sub == null or sub == ""list"" then
+        ui.separator()
+        ui.highlight(""ROUTER LIB VAULT"")
+        ui.separator()
+        ui.info(""Vuln path:   "" + vulnPath)
+        ui.info(""Harden path: "" + hardenPath)
+        ui.print("""")
+        pivotHandler = sessionManager.pivotSession.handler
+        pivotComp    = pivotHandler.shell.shell.host_computer
+        for label in [""vuln"", ""harden""]
+            dirPath = vulnPath
+            if label == ""harden"" then
+                dirPath = hardenPath
+            end if
+            dirFile = pivotComp.File(dirPath)
+            if dirFile == null or not dirFile.is_folder then
+                ui.dim(""  ["" + label + ""] empty (no files at "" + dirPath + "")"")
+            else
+                files = dirFile.get_files
+                if files == null or files.len == 0 then
+                    ui.dim(""  ["" + label + ""] empty"")
+                else
+                    ui.print(""  ["" + label + ""]"")
+                    for f in files
+                        ui.success(""    "" + f.name)
+                    end for
+                end if
+            end if
+        end for
+        ui.separator()
+        return
+    end if
+
+    if sub == ""setpath"" then
+        arg = params.arg
+        if arg == null then
+            ui.info(""Usage: routerlibs setpath vuln|harden <path>"")
+            return
+        end if
+        parts = arg.split("" "")
+        if parts.len < 2 then
+            ui.info(""Usage: routerlibs setpath vuln|harden <path>"")
+            return
+        end if
+        which   = parts[0]
+        newPath = parts[1]
+        if which == ""vuln"" then
+            configManager.set(""routerVulnLib"", newPath)
+            ui.success(""Vuln router lib path set to: "" + newPath)
+        else if which == ""harden"" then
+            configManager.set(""routerHardenLib"", newPath)
+            ui.success(""Harden router lib path set to: "" + newPath)
+        else
+            ui.warning(""Must be vuln or harden"")
+        end if
+        return
+    end if
+end function
+commandManager.register(_cmd)
+
+",0)

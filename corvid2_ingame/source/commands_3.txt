@@ -1,0 +1,1572 @@
+// --- attack ---
+_cmd = new Command
+_cmd.name = "attack"
+_cmd.description = "Guided attack workflow. Recon, exploit, pivot to LAN target, harvest, report. Usage: attack [public_ip] (lan_ip)"
+_cmd.parameters = [StringParameter.New({"name": "publicip", "required": true}), StringParameter.New({"name": "lanip", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+    attackManager  = mediator.getExtension("attackManager")
+    intelManager   = mediator.getExtension("intelManager")
+    metaxManager   = mediator.getExtension("metaxploitManager")
+    libManager     = mediator.getExtension("libManager")
+
+    publicIp  = params.publicip
+    lanTarget = params.lanip
+    hasLan = lanTarget.len > 0
+
+    // ── helper: privilege rank for comparison ────────────────────────────
+    privRank = function(priv)
+        if priv == "root" then
+            return 3
+        end if
+        if priv == "user" then
+            return 2
+        end if
+        if priv == "guest" then
+            return 1
+        end if
+        return 0
+    end function
+
+    // ── helper: pick best exploit result from a list ─────────────────────
+    bestResult = function(results)
+        best = null
+        for r in results
+            if best == null then
+                best = r
+            else if r.rtype == "shell" and best.rtype != "shell" then
+                best = r
+            else if r.rtype == "shell" and best.rtype == "shell" then
+                if privRank(r.privilege) > privRank(best.privilege) then
+                    best = r
+                end if
+            else if r.rtype == "computer" and best.rtype == "file" then
+                best = r
+            end if
+        end for
+        return best
+    end function
+
+    // ── helper: ask user what to do when stuck ───────────────────────────
+    askStuck = function(context, priv, ip)
+        ui.print("")
+        ui.warning("Got " + priv + " access on " + ip + " (" + context + ")")
+        ui.print("  1. Harvest credentials and attempt escalate")
+        ui.print("  2. Continue to next phase with current access")
+        ui.print("  3. Try exploits manually (msfconsole)")
+        ui.print("  4. Stop and report what we have")
+        ui.print("")
+        answer = user_input("Choose [1-4]: ")
+        return answer.trim
+    end function
+
+
+    // ── helper: clean a single session then step back ───────────────────
+    cleanOneSession = function(leaveMode)
+        sm      = mediator.getExtension("sessionManager")
+        cfg     = mediator.getExtension("configManager")
+        h       = sm.currentSession.handler
+        ip      = sm.currentSession.data.ip
+        label   = sm.currentSession.label
+
+        ui.info("Cleaning: " + label + " (" + ip.public + ")")
+
+        // Dead-session check - rebooted or interrupted connections will fail here
+        priv = "unknown"
+        privResult = h.privilege()
+        if typeof(privResult) == "string" then
+            priv = privResult
+        else
+            // Session is dead - remove it directly without cleanup
+            ui.warning("  Session unreachable (rebooted or disconnected) - skipping cleanup")
+            deadSession = sm.currentSession
+            deadIdx = sm.getSessionIndex(deadSession)
+            if deadIdx != null and deadIdx > 0 then
+                sm.sessions.remove(deadIdx)
+                newChainD = []
+                for scd in sm.sessionChain
+                    if scd != deadSession then
+                        newChainD.push(scd)
+                    end if
+                end for
+                sm.sessionChain = newChainD
+            end if
+            if sm.sessions.len > 0 then
+                sm.currentSession = sm.sessions[sm.sessions.len - 1]
+            end if
+            return
+        end if
+
+        // Kill and remove AdminMonitor if active on this IP
+        activeMonIp = cfg.get("monitorActive")
+        if not (activeMonIp isa Error) and activeMonIp == ip.public then
+            procs = h.showProcs()
+            if not (procs isa Error) then
+                for proc in procs
+                    if proc.hasIndex("COMMAND") then
+                        if proc.COMMAND == "AdminMonitor.exe" or proc.COMMAND == "AdminMonitor.exe" then
+                            pidV = ""
+                            if proc.hasIndex("PID") then
+                                pidV = proc.PID
+                            end if
+                            if pidV.len > 0 then
+                                h.closeProcess(pidV.val)
+                                ui.success("  AdminMonitor process killed.")
+                            end if
+                        end if
+                    end if
+                end for
+            end if
+            tmpF = h.getFile("/root/AdminMonitor.exe")
+            if not (tmpF isa Error) then
+                tmpF.delete()
+                ui.success("  /root/AdminMonitor.exe deleted.")
+            end if
+            cfg.set("monitorActive", "")
+        end if
+
+        // Delete cnmap binary and output if we ran lannmap on this session
+        activeCnmapIp = cfg.get("cnmapActive")
+        if not (activeCnmapIp isa Error) and activeCnmapIp == ip.public then
+            cnmapF = h.getFile("/root/cnmap")
+            if not (cnmapF isa Error) then
+                cnmapF.delete()
+                ui.success("  /root/cnmap deleted.")
+            end if
+            cnmapOutF = h.getFile("/root/cnmap_out.txt")
+            if not (cnmapOutF isa Error) then
+                cnmapOutF.delete()
+                ui.success("  /root/cnmap_out.txt deleted.")
+            end if
+            cfg.set("cnmapActive", "")
+        end if
+
+        // Delete any other files we uploaded to /shiny/ including scp'd .so files from local lib scan
+        tmpDir = h.getFile("/shiny")
+        if not (tmpDir isa Error) then
+            tmpKids = tmpDir.children()
+            if not (tmpKids isa Error) then
+                for tmpFile in tmpKids
+                    tName = tmpFile.name()
+                    if tName != "." and tName != ".." then
+                        if tmpFile.owner() == h.user then
+                            tmpFile.delete()
+                            ui.success("  Deleted /shiny/" + tName)
+                        end if
+                    end if
+                end for
+            end if
+        end if
+        // Also clean Nest /tmp of any .so files left by local lib scan
+        // (these are on session 0, not the target - clean regardless)
+        nestSession = sm.sessions[0]
+        if nestSession != null then
+            nestComp = nestSession.handler.shell.shell.host_computer
+            nestTmp = nestComp.File("/shiny")
+            if nestTmp != null then
+                nestTmpFiles = nestTmp.get_files
+                if nestTmpFiles != null then
+                    for ntf in nestTmpFiles
+                        if ntf.name.indexOf(".so") != null then
+                            ntf.delete()
+                            ui.success("  Deleted Nest /shiny/" + ntf.name)
+                        end if
+                    end for
+                end if
+            end if
+        end if
+
+        // If not root, auto-attempt escalation before log wipe
+        escalated2 = false
+        if priv != "root" then
+            ui.info("  Not root - attempting auto-escalate before log wipe...")
+            atkMgr = mediator.getExtension("attackManager")
+            esResult = atkMgr.escalate()
+            if not (esResult isa Error) then
+                priv  = sm.currentSession.handler.privilege()
+                h     = sm.currentSession.handler
+                escalated2 = true
+                ui.success("  Escalated to root for cleanup.")
+            else
+                ui.warning("  Could not escalate. Log cannot be wiped on this session.")
+            end if
+        end if
+
+        // Handle log corruption
+        if priv == "root" then
+            wipeResult = h.corruptLogs()
+            if not (wipeResult isa Error) then
+                ui.success("  Log wiped.")
+            else
+                ui.warning("  Log wipe failed: " + wipeResult.message)
+            end if
+        else
+            ui.warning("  Continuing without log wipe.")
+        end if
+
+        // Remove current session from list and switch to last remaining non-current session
+        // Don't use back() since sessionChain gets corrupted by 'use' calls
+        leavingSession = sm.currentSession
+        leavingIdx = sm.getSessionIndex(leavingSession)
+        if leavingIdx != null and leavingIdx > 0 then
+            sm.sessions.remove(leavingIdx)
+            // Also remove from sessionChain to keep it clean
+            newChain = []
+            for sc in sm.sessionChain
+                if sc != leavingSession then
+                    newChain.push(sc)
+                end if
+            end for
+            sm.sessionChain = newChain
+        end if
+        // If escalated, also remove the original guest session
+        if escalated2 then
+            ui.info("  Closing original guest session...")
+            // The escalated session was added on top - remove it too
+            if sm.sessions.len > 1 then
+                escalatedIdx = sm.sessions.len - 1
+                escalatedSess = sm.sessions[escalatedIdx]
+                sm.sessions.remove(escalatedIdx)
+                newChain2 = []
+                for sc2 in sm.sessionChain
+                    if sc2 != escalatedSess then
+                        newChain2.push(sc2)
+                    end if
+                end for
+                sm.sessionChain = newChain2
+            end if
+        end if
+        // Set current to last remaining session
+        if sm.sessions.len > 0 then
+            sm.currentSession = sm.sessions[sm.sessions.len - 1]
+            sm.sessionChain = [sm.sessions[0]]
+        end if
+        ui.success("  Backed out to: " + sm.currentSession.label)
+    end function
+
+    // ── helper: full leave - clean every session back to Nest ─────────────
+    doLeave = function(leaveMode)
+        sm = mediator.getExtension("sessionManager")
+
+        // Count how many sessions deep we are (session 0 is Nest - never clean it)
+        // Walk back through every session until we reach the Nest
+        ui.separator()
+        ui.info("Starting full cleanup sequence (" + leaveMode + " mode)...")
+        ui.print("")
+
+        maxSteps = 20 // safety limit
+        step = 0
+        while step < maxSteps
+            sessions = sm.listSessions()
+            if sessions.len <= 1 then
+                break // only Nest remains
+            end if
+            // Always switch to the LAST non-Nest session in the list
+            // This ignores sessionChain order entirely so 'use' mid-chain doesn't break leave
+            lastIdx = sessions.len - 1
+            lastSession = sessions[lastIdx]
+            if lastSession.label == "Nest" then
+                break
+            end if
+            sm.setCurrentSession(lastSession)
+            currentLabel = sm.currentSession.label
+            cleanOneSession(leaveMode)
+            newLabel = sm.currentSession.label
+            if newLabel == currentLabel then
+                ui.warning("  Session did not change after cleanup - breaking to avoid infinite loop.")
+                break
+            end if
+            step = step + 1
+        end while
+
+        ui.print("")
+        ui.success("Full cleanup complete. Back on Nest.")
+        ui.separator()
+    end function
+
+    // ── helper: run harvest on current session ───────────────────────────
+    // Always harvests - no skip. Intel manager handles credential deduplication.
+    runHarvest = function(pubIp, lanIp)
+        ui.separator()
+        ui.highlight("HARVESTING " + pubIp)
+        ui.separator()
+        result = intelManager.harvestAll(pubIp, lanIp)
+        if result isa Error then
+            ui.warning("Harvest error: " + result.message)
+        end if
+    end function
+
+    // ── helper: try escalate ─────────────────────────────────────────────
+    tryEscalate = function()
+        ui.info("Attempting escalate...")
+        result = attackManager.escalate()
+        if result isa Error then
+            ui.warning(result.message)
+            return false
+        end if
+        return true
+    end function
+
+    // ── helper: scan all ports, return best overall shell ────────────────
+    scanAllPorts = function(pubIp, lanIp, routerIp, portList)
+        allResults  = {}
+        bestShell   = null
+        bestPriv    = 0
+
+        for portRecord in portList
+            if not portRecord.forwarded then
+                continue
+            end if
+            port = portRecord.port
+            if port == 0 then
+                continue
+            end if
+
+            ui.info("Scanning port " + str(port) + " (" + portRecord.service + " " + portRecord.version + ")...")
+            results = attackManager.runScan(pubIp, port, lanIp, routerIp)
+            if results isa Error then
+                ui.warning("Port " + str(port) + ": " + results.message)
+                continue
+            end if
+            if results.len == 0 then
+                continue
+            end if
+            allResults[str(port)] = results
+            ui.success("Port " + str(port) + ": " + results.len + " exploit result(s)")
+
+            // Track best shell found so far across all ports
+            pick = bestResult(results)
+            if pick != null then
+                if pick.rtype == "shell" or pick.rtype == "computer" then
+                    if privRank(pick.privilege) > bestPriv then
+                        bestPriv  = privRank(pick.privilege)
+                        bestShell = {}
+                        bestShell.port    = port
+                        bestShell.result  = pick
+                    end if
+                end if
+            end if
+        end for
+
+        return bestShell
+    end function
+
+    // ════════════════════════════════════════════════════════════════════
+    // ── runRouterAttack: unified router exploit function ─────────────────
+    // Replaces routerScan + routerMailAttack.
+    // autoMode=true:  run all exploits silently, import everything to DB
+    // autoMode=false: collect all results, present interactive menu
+    runRouterAttack = function(publicIp, lanIp, autoMode)
+        if autoMode == null then
+            autoMode = false
+        end if
+        if lanIp == null then
+            lanIp = ""
+        end if
+
+        ui.separator()
+        if autoMode then
+            ui.highlight("ROUTER ATTACK  " + publicIp)
+        else
+            ui.highlight("ROUTER ATTACK  " + publicIp)
+        end if
+        ui.separator()
+
+        meta = include_lib("/lib/metaxploit.so")
+        if meta == null then
+            meta = include_lib(current_path + "/metaxploit.so")
+        end if
+        if meta == null then
+            ui.warning("metaxploit.so not available")
+            return
+        end if
+
+        crypto = include_lib("/lib/crypto.so")
+        if crypto == null then
+            crypto = include_lib(current_path + "/crypto.so")
+        end if
+
+        dbManager2 = mediator.getExtension("databaseManager")
+
+        ui.info("Connecting to router at " + publicIp + "...")
+        netSession = meta.net_use(publicIp)
+        if not netSession then
+            ui.warning("Could not connect to router at " + publicIp)
+            return
+        end if
+
+        routerLib = netSession.dump_lib
+        if not routerLib then
+            ui.warning("Could not get router library")
+            return
+        end if
+        kbLibName    = routerLib.lib_name
+        kbLibVersion = routerLib.version
+        ui.success("Router library: " + kbLibName + " v" + kbLibVersion)
+
+        // ── Build exploit list from KB or full scan ───────────────────────
+        toAttempt = []
+        kbRecords = dbManager2.kbLookup(kbLibName, kbLibVersion)
+        if kbRecords.len > 0 then
+            ui.success("KB hit: " + kbLibName + " v" + kbLibVersion + " - " + str(kbRecords.len) + " known exploit(s)")
+            for kr in kbRecords
+                if kr.outcome == "number_result" then
+                    continue
+                end if
+                if kr.outcome == "version_mismatch" then
+                    continue
+                end if
+                if kr.outcome == "uncertain" and kr.hasIndex("fail_count") and kr.fail_count > 3 then
+                    continue
+                end if
+                entry = {}
+                entry.addr = kr.address
+                entry.vn   = kr.exploit
+                entry.constraints = []
+                if kr.hasIndex("constraints") and kr.constraints.len > 0 then
+                    for cs in kr.constraints.split(" ")
+                        if cs.len > 0 then
+                            entry.constraints.push(cs)
+                        end if
+                    end for
+                end if
+                toAttempt.push(entry)
+            end for
+        else
+            // Full scan
+            addresses = meta.scan(routerLib)
+            if addresses == null or addresses.len == 0 then
+                ui.warning("No vulnerable addresses found")
+                ui.info("Check hackshop for kernel_router " + kbLibVersion + " exploits")
+                return
+            end if
+            ui.success("Found " + str(addresses.len) + " vulnerable address(es) - scanning...")
+            for addr in addresses
+                scanText = meta.scan_address(routerLib, addr)
+                if scanText == null then
+                    continue
+                end if
+                vulnNames = []
+                chunks = scanText.split("Unsafe check: ")
+                for chunk in chunks
+                    if chunk == chunks[0] then
+                        continue
+                    end if
+                    bStart = chunk.indexOf("<b>")
+                    bEnd   = chunk.indexOf("</b>")
+                    if bStart != null and bEnd != null then
+                        vn = chunk[bStart+3:bEnd]
+                        if vn.len > 0 then
+                            vulnNames.push(vn)
+                        end if
+                    end if
+                end for
+                constraints = []
+                for scanLine in scanText.split(char(10))
+                    trimmed = scanLine.trim
+                    if trimmed.indexOf("* ") == 0 then
+                        constraints.push(trimmed[2:])
+                    end if
+                end for
+                for vn in vulnNames
+                    entry = {}
+                    entry.addr = addr
+                    entry.vn   = vn
+                    entry.constraints = constraints
+                    toAttempt.push(entry)
+                end for
+            end for
+        end if
+
+        if toAttempt.len == 0 then
+            ui.warning("No exploits to try")
+            return
+        end if
+
+        ui.info("Trying " + str(toAttempt.len) + " exploit(s)...")
+        ui.separator()
+
+        // ── Try ALL exploits, collect every successful result ─────────────
+        collected = []
+        for attempt in toAttempt
+            addr = attempt.addr
+            vn   = attempt.vn
+
+            if lanIp.len > 0 then
+                result = routerLib.overflow(addr, vn, lanIp)
+            else
+                result = routerLib.overflow(addr, vn)
+            end if
+
+            resultType = typeof(result)
+
+            if resultType == "number" then
+                dbManager2.kbRecord(kbLibName, kbLibVersion, addr, vn, "number_result", attempt.constraints, "number", "", "", "")
+                continue
+            end if
+            if result == null or resultType == "string" then
+                dbManager2.kbRecord(kbLibName, kbLibVersion, addr, vn, "uncertain", attempt.constraints, "Failed", "", "", "")
+                continue
+            end if
+
+            // Record success
+            dbManager2.kbRecord(kbLibName, kbLibVersion, addr, vn, "success", attempt.constraints, resultType, "", "guest", "")
+            dbManager2.save()
+
+            entry = {}
+            entry.addr       = addr
+            entry.vn         = vn
+            entry.result     = result
+            entry.resultType = resultType
+            collected.push(entry)
+
+            ui.success("  [" + str(collected.len - 1) + "] " + resultType + " <- " + vn)
+        end for
+
+        if collected.len == 0 then
+            ui.print("")
+            ui.warning("All exploits failed - constraints may not be met")
+            ui.info("  Active user on network? Enough computers on network?")
+            ui.separator()
+            return
+        end if
+
+        dbManager2.save()
+
+        // ── AUTO MODE: process everything silently ────────────────────────
+        if autoMode then
+            harvestedIps = []
+            for entry in collected
+                // Skip duplicate computer results for same LAN IP
+                if entry.resultType == "computer" then
+                    if harvestedIps.indexOf(lanIp) != null then
+                        ui.dim("  Skipping duplicate computer result for " + lanIp)
+                        continue
+                    end if
+                    harvestedIps.push(lanIp)
+                end if
+                routerProcessResult(entry.result, entry.resultType, publicIp, lanIp, crypto, dbManager2)
+            end for
+            // ── Post-result sudo escalation check ─────────────────────────
+            // If routerattack yielded a shell session on this IP and we now
+            // have a cracked root password in DB (from computer/file harvest
+            // above), attempt Strategy 3 sudo escalation automatically.
+            routerSudoAttempt(publicIp, lanIp, dbManager2)
+            ui.separator()
+            return
+        end if
+
+        // ── INTERACTIVE MODE: present menu ────────────────────────────────
+        ui.print("")
+        ui.highlight("RESULTS FOUND")
+        ui.separator()
+        for i in range(0, collected.len - 1)
+            entry = collected[i]
+            rType = entry.resultType
+            desc  = ""
+            if rType == "computer" then
+                desc = "extract mail / passwd / bank"
+            else if rType == "shell" then
+                desc = "guest shell on router - adopt as session"
+            else if rType == "file" then
+                fPath = ""
+                if not (entry.result isa Error) then
+                    fPath = " at " + entry.result.path
+                end if
+                desc = "file/folder access" + fPath + " - usernames / passwd"
+            else
+                desc = rType
+            end if
+            ui.info("  [" + str(i) + "] " + rType + "  ->  " + desc)
+        end for
+
+        ui.print("")
+        ui.info("Options:")
+        ui.print("  all    - action all results")
+        ui.print("  0-" + str(collected.len - 1) + "    - action specific result")
+        ui.print("  skip   - cancel")
+        ui.print("")
+        choice = user_input("  Choice: ").trim.lower
+
+        if choice == "skip" or choice == "s" then
+            return
+        end if
+
+        toAction = []
+        if choice == "all" then
+            toAction = collected[0:]
+        else
+            idx = choice.val
+            if idx >= 0 and idx < collected.len then
+                toAction = [collected[idx]]
+            else
+                ui.warning("Invalid choice")
+                return
+            end if
+        end if
+
+        for entry in toAction
+            routerProcessResult(entry.result, entry.resultType, publicIp, lanIp, crypto, dbManager2)
+        end for
+
+        // ── Post-result sudo escalation check ─────────────────────────────
+        // Same check as autoMode: if we have a shell session on this IP
+        // and a cracked root password in DB, attempt Strategy 3 now.
+        routerSudoAttempt(publicIp, lanIp, dbManager2)
+
+        ui.separator()
+    end function
+
+    // ── routerSudoAttempt: attempt sudo escalation after router harvest ───
+    // Called after all router results processed. Checks if we now have both
+    // an active shell session on publicIp AND a cracked root password in DB.
+    // If so, fires the get_shell GCO trick to escalate without SSH port.
+    routerSudoAttempt = function(publicIp, lanIp, dbManager2)
+        ui             = mediator.getExtension("corvidUi")
+        sessionManager = mediator.getExtension("sessionManager")
+
+        // Find if we have a live non-root shell session on this IP
+        targetShell = null
+        for sess in sessionManager.sessions
+            if sess == sessionManager.pivotSession then
+                continue
+            end if
+            if sess.data.ip.public != publicIp then
+                continue
+            end if
+            if not (sess.handler isa ShellSession) then
+                continue
+            end if
+            sessPriv = sess.handler.privilege()
+            if sessPriv == "root" then
+                // Already root - nothing to do
+                return
+            end if
+            targetShell = sess.handler.shell.shell
+        end for
+
+        if targetShell == null then
+            return
+        end if
+
+        // Check DB for a cracked root password for this IP
+        rootPass3 = ""
+        allCreds3 = dbManager2.findCredentialsByIp(publicIp)
+        for c3 in allCreds3
+            if c3.type == "system" and c3.username == "root" and c3.password.len > 0 then
+                rootPass3 = c3.password
+            end if
+        end for
+        if lanIp.len > 0 then
+            lanCreds3 = dbManager2.findCredentialsByIp(lanIp)
+            for c3 in lanCreds3
+                if c3.type == "system" and c3.username == "root" and c3.password.len > 0 then
+                    rootPass3 = c3.password
+                end if
+            end for
+        end if
+
+        if rootPass3.len == 0 then
+            return
+        end if
+
+        ui.info("Router harvest found root password - attempting sudo escalation...")
+
+        wp3r = findWritePerms(targetShell)
+        if wp3r == null then
+            ui.dim("  Sudo escalation: no writable path on target - skipping")
+            return
+        end if
+
+        // Embed credentials directly in script source to avoid params
+        // space-splitting issues with native passwords
+        q3r = char(34)
+        sudoLines3 = "cob = get_custom_object" + char(10)
+        sudoLines3 = sudoLines3 + "cob.shell = get_shell(" + q3r + "root" + q3r + ", " + q3r + rootPass3 + q3r + ")"
+
+        targetShell.host_computer.touch(wp3r.path, "csudo.src")
+        sudoFile3 = targetShell.host_computer.File(wp3r.path + "/csudo.src")
+        if sudoFile3 == null then
+            ui.dim("  Sudo escalation: could not create script - skipping")
+            return
+        end if
+
+        sudoFile3.set_content(sudoLines3)
+        buildRes3 = targetShell.build(wp3r.path + "/csudo.src", wp3r.path)
+        if buildRes3.len > 0 then
+            ui.dim("  Sudo escalation: build failed - " + buildRes3)
+            deadFile3 = targetShell.host_computer.File(wp3r.path + "/csudo.src")
+            if deadFile3 != null then
+                deadFile3.delete()
+            end if
+            return
+        end if
+
+        targetShell.launch(wp3r.path + "/csudo")
+        cob3r = get_custom_object
+        if cob3r.hasIndex("shell") and typeof(cob3r.shell) == "shell" then
+            rootShell3 = cob3r.shell
+            for s3rname in ["csudo.src", "csudo"]
+                s3rf = targetShell.host_computer.File(wp3r.path + "/" + s3rname)
+                if s3rf != null then
+                    s3rf.delete()
+                end if
+            end for
+            newSess3r = sessionManager.addSession(rootShell3, "root@" + publicIp)
+            if not (newSess3r isa Error) then
+                sessionManager.setCurrentSession(newSess3r)
+                updateData3r = {}
+                updateData3r.public_ip = publicIp
+                updateData3r.lan_ip    = lanIp
+                updateData3r.privilege = "root"
+                updateData3r.status    = TARGET_STATUS.EXPLOITED
+                dbManager2.upsertTarget(updateData3r)
+                credUpdate3r = {}
+                credUpdate3r.type      = CRED_TYPES.SYSTEM
+                credUpdate3r.username  = "root"
+                credUpdate3r.password  = rootPass3
+                credUpdate3r.public_ip = publicIp
+                credUpdate3r.lan_ip    = lanIp
+                credUpdate3r.source    = "sudo_escalation"
+                dbManager2.upsertCredential(credUpdate3r)
+                dbManager2.save()
+                ui.success("Escalated to root via Clover Method after router harvest")
+            end if
+        else
+            ui.dim("  Sudo escalation: get_shell returned no shell")
+            for s3rname in ["csudo.src", "csudo"]
+                s3rf2 = targetShell.host_computer.File(wp3r.path + "/" + s3rname)
+                if s3rf2 != null then
+                    s3rf2.delete()
+                end if
+            end for
+        end if
+    end function
+
+    // ── routerProcessResult: action a single router exploit result ────────
+    routerProcessResult = function(result, resultType, publicIp, lanIp, crypto, dbManager2)
+        ui      = mediator.getExtension("corvidUi")
+        session = mediator.getExtension("sessionManager")
+
+        if resultType == "shell" then
+            // Adopt shell as a Corvid session
+            ui.highlight("SHELL RESULT")
+            ui.separator()
+            ui.success("Got guest shell on router")
+            newSess = session.addSession(result, "router@" + publicIp)
+            if not (newSess isa Error) then
+                session.setCurrentSession(newSess)
+                ui.success("Shell adopted as session. Run harvest or escalate.")
+            else
+                ui.warning("Could not adopt shell: " + newSess.message)
+            end if
+
+        else if resultType == "computer" then
+            // Extract everything from computer object
+            ui.highlight("COMPUTER RESULT  " + lanIp)
+            ui.separator()
+            routerHarvestComputer(result, publicIp, lanIp, crypto, dbManager2)
+
+        else if resultType == "file" then
+            // File/folder result - extract usernames and passwd
+            ui.highlight("FILE RESULT")
+            ui.separator()
+            routerHarvestFile(result, publicIp, lanIp, crypto, dbManager2)
+
+        else
+            ui.info("Result type " + resultType + " - no handler defined")
+        end if
+    end function
+
+    // ── routerHarvestComputer: extract all data from computer object ──────
+    routerHarvestComputer = function(compObj, publicIp, lanIp, crypto, dbManager2)
+        ui = mediator.getExtension("corvidUi")
+
+        // ── Mail ──────────────────────────────────────────────────────────
+        ui.info("Extracting mail credentials...")
+        homeFolder = compObj.File("/home")
+        if homeFolder != null and not (homeFolder isa Error) then
+            userFolders = homeFolder.get_folders
+            if userFolders != null and userFolders.len > 0 then
+                mailCount = 0
+                for userFolder in userFolders
+                    mailFile = compObj.File("/home/" + userFolder.name + "/Config/Mail.txt")
+                    if mailFile == null then
+                        continue
+                    end if
+                    if not mailFile.has_permission("r") then
+                        continue
+                    end if
+                    raw = mailFile.get_content
+                    if raw == null or raw.len == 0 then
+                        continue
+                    end if
+                    // Mail.txt is plaintext: email@domain.com:hash (possibly multi-line)
+                    mailLines = raw.split(char(10))
+                    for mailLine in mailLines
+                        if mailLine.len == 0 then
+                            continue
+                        end if
+                        colonIdx = mailLine.indexOf(":")
+                        atIdx    = mailLine.indexOf("@")
+                        if colonIdx == null or atIdx == null then
+                            continue
+                        end if
+                        if atIdx >= colonIdx then
+                            continue
+                        end if
+                        emailAddr = mailLine[:colonIdx].trim
+                        hashPart  = mailLine[colonIdx + 1:].trim
+                        if emailAddr.len == 0 or hashPart.len == 0 then
+                            continue
+                        end if
+                        emailPass = ""
+                        if crypto != null then
+                            dec = crypto.decipher(hashPart)
+                            if dec != null then
+                                emailPass = dec
+                            end if
+                        end if
+                        ui.success("  " + userFolder.name + " | " + emailAddr + " | " + emailPass)
+                        mailCred = {}
+                        mailCred.type = "mail"
+                        mailCred.username = emailAddr
+                        mailCred.password = emailPass
+                        mailCred.public_ip = publicIp
+                        mailCred.lan_ip = lanIp
+                        mailCred.source = "routerattack"
+                        dbManager2.upsertCredential(mailCred)
+                        mailCount = mailCount + 1
+                    end for
+                end for
+                if mailCount == 0 then
+                    ui.dim("  No mail credentials found")
+                end if
+            end if
+        end if
+
+        // ── Passwd ────────────────────────────────────────────────────────
+        ui.info("Extracting passwd...")
+        passwdFile = compObj.File("/etc/passwd")
+        if passwdFile != null and not (passwdFile isa Error) then
+            if passwdFile.has_permission("r") then
+                raw = passwdFile.get_content
+                if raw != null and raw.len > 0 and crypto != null then
+                    deciphered = crypto.decipher(raw)
+                    if deciphered != null then
+                        ui.success("  Root password: " + deciphered)
+                        cd2 = {}
+                        cd2.type = "system"
+                        cd2.username = "root"
+                        cd2.password = deciphered
+                        cd2.public_ip = publicIp
+                        cd2.lan_ip = lanIp
+                        cd2.source = "routerattack_passwd"
+                        dbManager2.upsertCredential(cd2)
+                    end if
+                end if
+            end if
+        end if
+
+        // ── Bank ──────────────────────────────────────────────────────────
+        ui.info("Extracting bank records...")
+        homeFolder2 = compObj.File("/home")
+        if homeFolder2 != null and not (homeFolder2 isa Error) then
+            userFolders2 = homeFolder2.get_folders
+            if userFolders2 != null then
+                bankCount = 0
+                for uf in userFolders2
+                    bankFile = compObj.File("/home/" + uf.name + "/Config/Bank.txt")
+                    if bankFile == null then
+                        continue
+                    end if
+                    if not bankFile.has_permission("r") then
+                        continue
+                    end if
+                    raw2 = bankFile.get_content
+                    if raw2 != null and raw2.len > 0 then
+                        // Bank.txt format: accountNumber:md5hash
+                        bankStr2 = raw2.trim
+                        bankNum2 = bankStr2
+                        bankPass2 = ""
+                        colonIdx2 = bankStr2.indexOf(":")
+                        if colonIdx2 != null then
+                            bankNum2 = bankStr2[:colonIdx2]
+                            bankHash2 = bankStr2[colonIdx2 + 1:]
+                            if crypto != null and bankHash2.len > 0 then
+                                decB2 = crypto.decipher(bankHash2)
+                                if decB2 != null then
+                                    bankPass2 = decB2
+                                end if
+                            end if
+                        end if
+                        ui.success("  Bank record: " + uf.name + " | " + bankNum2 + " | " + bankPass2)
+                        bd = {}
+                        bd.type = "bank"
+                        bd.username = uf.name
+                        bd.password = bankPass2
+                        bd.bank_number = bankNum2
+                        bd.public_ip = publicIp
+                        bd.lan_ip = lanIp
+                        bd.source = "routerattack"
+                        dbManager2.upsertCredential(bd)
+                        bankCount = bankCount + 1
+                    end if
+                end for
+                if bankCount == 0 then
+                    ui.dim("  No bank records found")
+                end if
+            end if
+        end if
+
+        dbManager2.save()
+        ui.success("Harvest complete.")
+        ui.info("Mail.exe -> PF -> Funny Game -> send your Nest IP + port 1222")
+    end function
+
+    // ── routerHarvestFile: extract data from file/folder result ──────────
+    routerHarvestFile = function(fileObj, publicIp, lanIp, crypto, dbManager2)
+        ui = mediator.getExtension("corvidUi")
+
+        // Walk up to root
+        rootFolder = fileObj
+        while rootFolder.path != "/"
+            rootFolder = rootFolder.parent
+        end while
+
+        // Try /etc/passwd
+        ui.info("Attempting /etc/passwd...")
+        etcF = null
+        for rf in rootFolder.get_folders
+            if rf.path == "/etc" then
+                etcF = rf
+            end if
+        end for
+        if etcF != null then
+            for ef in etcF.get_files
+                if ef.name != "passwd" then
+                    continue
+                end if
+                if not ef.has_permission("r") then
+                    continue
+                end if
+                rawPwd = ef.get_content
+                if rawPwd != null and rawPwd.len > 0 and crypto != null then
+                    rootPwd = crypto.decipher(rawPwd)
+                    if rootPwd != null then
+                        ui.success("  Root password: " + rootPwd)
+                        cdRoot = {}
+                        cdRoot.type = "system"
+                        cdRoot.username = "root"
+                        cdRoot.password = rootPwd
+                        cdRoot.public_ip = publicIp
+                        cdRoot.lan_ip = lanIp
+                        cdRoot.source = "routerattack_file"
+                        dbManager2.upsertCredential(cdRoot)
+                        dbManager2.save()
+                    end if
+                end if
+            end for
+        end if
+
+        // Walk /home for usernames and mail
+        ui.info("Walking /home for users...")
+        homeF = null
+        if fileObj.path == "/home" then
+            homeF = fileObj
+        else
+            for rf2 in rootFolder.get_folders
+                if rf2.path == "/home" then
+                    homeF = rf2
+                end if
+            end for
+        end if
+
+        if homeF == null then
+            ui.warning("  /home not accessible")
+            return
+        end if
+
+        userFolders = homeF.get_folders
+        if userFolders == null or userFolders.len == 0 then
+            ui.warning("  No user folders in /home")
+            return
+        end if
+
+        // Get domain hint from DB
+        smtpDomain = ""
+        existingPersons = dbManager2.allPersons()
+        for ep in existingPersons
+            if smtpDomain.len > 0 then
+                break
+            end if
+            epIp = ""
+            if ep.hasIndex("public_ip") then
+                epIp = ep.public_ip
+            end if
+            if epIp == publicIp and ep.hasIndex("email") then
+                eParts = ep.email.split("@")
+                if eParts.len >= 2 then
+                    smtpDomain = eParts[1]
+                end if
+            end if
+        end for
+
+        ui.info("Found " + str(userFolders.len) + " user(s):")
+        for uf in userFolders
+            uname = uf.name
+            email = ""
+            pass  = ""
+
+            // Try to find Mail.txt
+            subFolders = uf.get_folders
+            if subFolders != null then
+                for sf in subFolders
+                    if sf.name != "Config" then
+                        continue
+                    end if
+                    sfFiles = sf.get_files
+                    if sfFiles == null then
+                        continue
+                    end if
+                    for mf in sfFiles
+                        if mf.name != "Mail.txt" then
+                            continue
+                        end if
+                        if not mf.has_permission("r") then
+                            continue
+                        end if
+                        raw = mf.get_content
+                        if raw == null or raw.len == 0 then
+                            continue
+                        end if
+                        // Mail.txt is plaintext: email@domain.com:hash
+                        if crypto != null then
+                            for ml in raw.split(char(10))
+                                if ml.len == 0 then
+                                    continue
+                                end if
+                                ci = ml.indexOf(":")
+                                ai = ml.indexOf("@")
+                                if ci == null or ai == null or ai >= ci then
+                                    continue
+                                end if
+                                email = ml[:ci].trim
+                                mHash = ml[ci + 1:].trim
+                                if email.len == 0 or mHash.len == 0 then
+                                    continue
+                                end if
+                                dec = crypto.decipher(mHash)
+                                if dec != null then
+                                    pass = dec
+                                end if
+                            end for
+                        end if
+                    end for
+                end for
+            end if
+
+            // Save person
+            pd = {}
+            pd.username   = uname
+            pd.public_ip  = publicIp
+            pd.lan_ip     = lanIp
+            pd.source     = "routerattack_file"
+            if email.len > 0 then
+                pd.email = email
+                passDisplay = " (no pass)"
+                if pass.len > 0 then
+                    passDisplay = " | " + pass
+                end if
+                ui.success("  " + uname + " | " + email + passDisplay)
+                if pass.len > 0 then
+                    cdMail = {}
+                    cdMail.type = "mail"
+                    cdMail.username = email
+                    cdMail.password = pass
+                    cdMail.public_ip = publicIp
+                    cdMail.lan_ip = lanIp
+                    cdMail.source = "routerattack_file"
+                    dbManager2.upsertCredential(cdMail)
+                end if
+            else
+                if smtpDomain.len > 0 then
+                    pd.email = uname + "@" + smtpDomain
+                    ui.info("  " + uname + " (" + pd.email + ")  -> social engineering target")
+                else
+                    ui.info("  " + uname + "  -> social engineering target")
+                end if
+            end if
+            dbManager2.upsertPerson(pd)
+        end for
+
+        dbManager2.save()
+        ui.info("Mail.exe -> PF -> Funny Game -> send your Nest IP + port 1222")
+    end function
+
+
+    // Pre-flight: check pivot session has a valid connection
+    pivotCheck = sessionManager.pivotSession
+    if pivotCheck == null then
+        return Error.New("No pivot session available. Restart Corvid from your server.", "NO_PIVOT")
+    end if
+    pivotPriv = pivotCheck.handler.privilege()
+    if pivotPriv == "none" or pivotPriv == "" then
+        return Error.New("Pivot session has no active connection. Restart Corvid from your server.", "NO_CONNECTION")
+    end if
+
+    // PHASE 1 — RECON
+    // ════════════════════════════════════════════════════════════════════
+    ui.print("")
+    ui.separator()
+    ui.highlight("PHASE 1 — RECONNAISSANCE")
+    ui.separator()
+
+    // Whois
+    autoWhoisCfg = configManager.get("autoWhois")
+    if autoWhoisCfg isa Error then
+        autoWhoisCfg = "1"
+    end if
+    if autoWhoisCfg == "1" then
+        ui.info("Running whois on " + publicIp + "...")
+        whoisResult = intelManager.harvestWhois(publicIp)
+        if not (whoisResult isa Error) then
+            ui.success("Whois: " + whoisResult.domain + " | " + whoisResult.adminEmail)
+        end if
+    end if
+
+    // nmap
+    ui.info("Scanning router at " + publicIp + "...")
+    router = Router.New(publicIp)
+    if router isa Error then
+        return Error.New("Could not reach router at " + publicIp + ": " + router.message, "NO_ROUTER")
+    end if
+
+    routerIp     = router.localIp()
+    routerPublic = router.publicIp()
+    ui.success("Router: " + routerPublic + " | " + routerIp + " | kernel " + router.kernelVersion())
+
+    rules = router.firewallRules()
+    if rules.len > 0 then
+        ui.warning("Firewall rules: " + rules.join(", "))
+    else
+        ui.success("No firewall rules")
+    end if
+
+    devices = router.devices()
+    if devices isa Error then
+        return Error.New("Could not enumerate devices: " + devices.message, "NMAP_ERROR")
+    end if
+
+    // Save all devices to DB and collect public-facing ports
+    publicPorts = []
+    deviceCount = 0
+    for kv in devices
+        deviceIp = kv.key
+        ports    = kv.value
+        deviceCount = deviceCount + 1
+        for port in ports
+            targetData = {}
+            targetData.public_ip = publicIp
+            targetData.lan_ip    = deviceIp
+            targetData.router_ip = routerPublic
+            portRecord = {}
+            portRecord.port      = port.port
+            portRecord.service   = port.service
+            portRecord.version   = port.version
+            portRecord.forwarded = port.forwarded
+            portRecord.exploited = false
+            targetData.ports = [portRecord]
+            dbManager.upsertTarget(targetData)
+            if port.forwarded and port.port > 0 then
+                publicPorts.push(port)
+            end if
+        end for
+    end for
+    // Deduplicate publicPorts by port number (multiple devices may share forwarded port)
+    seenPorts = []
+    dedupedPorts = []
+    for p in publicPorts
+        if seenPorts.indexOf(p.port) == null then
+            seenPorts.push(p.port)
+            dedupedPorts.push(p)
+        end if
+    end for
+    publicPorts = dedupedPorts
+    dbManager.save()
+    ui.success("Found " + str(deviceCount) + " device(s), " + str(publicPorts.len) + " forwarded port(s)")
+
+    // Auto smtpgrab if port 25 is forwarded
+    autoSmtpCfg = configManager.get("autoSmtp")
+    if autoSmtpCfg isa Error then
+        autoSmtpCfg = "1"
+    end if
+    if autoSmtpCfg == "1" then
+    for smtpPort in publicPorts
+        if smtpPort.service == "smtp" or smtpPort.port == 25 then
+            ui.info("SMTP detected - attempting user enumeration...")
+            smtpCrypto = include_lib("/lib/crypto.so")
+            if smtpCrypto != null then
+                smtpResult = smtpCrypto.smtp_user_list(publicIp, smtpPort.port)
+                if smtpResult != null then
+                    smtpUsers = []
+                    if typeof(smtpResult) == "list" then
+                        smtpUsers = smtpResult
+                    else
+                        for smtpLine in smtpResult.split(char(10))
+                            st = smtpLine.trim
+                            if st.len > 0 then
+                                smtpUsers.push(st)
+                            end if
+                        end for
+                    end if
+                    if smtpUsers.len > 0 then
+                        ui.success("SMTP users found: " + str(smtpUsers.len))
+                        for su in smtpUsers
+                            ui.info("  " + su)
+                            spd = {}
+                            spd.public_ip = publicIp
+                            spd.source    = "smtpgrab"
+                            if su.indexOf("@") != null then
+                                spts = su.split("@")
+                                spd.username = spts[0]
+                                spd.email    = su
+                            else
+                                spd.username = su
+                            end if
+                            dbManager.upsertPerson(spd)
+                        end for
+                        dbManager.save()
+                    else
+                        ui.dim("SMTP: no users returned")
+                    end if
+                else
+                    ui.dim("SMTP: smtp_user_list returned null (may not be supported)")
+                end if
+            end if
+            break
+        end if
+    end for
+    end if // autoSmtp
+
+    ui.print("")
+
+    // ════════════════════════════════════════════════════════════════════
+    // PHASE 2 — INITIAL COMPROMISE
+    // ════════════════════════════════════════════════════════════════════
+    ui.separator()
+    ui.highlight("PHASE 2 — INITIAL COMPROMISE (" + publicIp + ")")
+    ui.separator()
+
+    if publicPorts.len == 0 then
+        ui.warning("No forwarded ports found on " + publicIp + ".")
+        ui.print("")
+        lanStr = ""
+        if hasLan then
+            lanStr = " " + lanTarget
+        end if
+        answer = user_input("  No exposed ports. Run router exploit scan? (yes/no): ")
+        if answer.trim == "yes" or answer.trim == "y" then
+            runRouterAttack(publicIp, lanTarget, true)
+        else
+            ui.info("To attempt later: routerattack " + publicIp + lanStr)
+            ui.info("Or: Mail.exe -> PF -> Password request -> send to admin posing as target user")
+        end if
+        return
+    end if
+
+    // Scan all ports, stop exploiting once root achieved
+    entrySession  = null
+    entryPriv     = "none"
+
+    // Collect LAN IP for the public-facing device
+    pubLanIp = "unknown"
+    for kv in devices
+        for port in kv.value
+            if port.forwarded then
+                pubLanIp = kv.key
+            end if
+        end for
+    end for
+
+    bestEntry = scanAllPorts(publicIp, pubLanIp, routerPublic, publicPorts)
+
+    if bestEntry == null then
+        ui.warning("No exploitable results found on any port.")
+        ui.info("Scan data saved to database.")
+        ui.print("")
+        if hasLan then
+            answer = user_input("  Attempt router exploit scan to find email credentials? (yes/no): ")
+            if answer.trim == "yes" or answer.trim == "y" then
+                runRouterAttack(publicIp, lanTarget, true)
+                return
+            end if
+        end if
+        ui.info("Try: Attack menu -> 3 (Router) for mail extraction, or msfconsole for manual exploitation")
+        return
+    end if
+
+    // Note if no SSH vulnerabilities found
+    hasSSHVuln = false
+    for pe in publicPorts
+        if pe == 22 then
+            hasSSHVuln = true
+        end if
+    end for
+    if not hasSSHVuln then
+        ui.dim("Tip: No SSH port found on this target - hard to reach remotely.")
+        ui.dim("If you gain root, deploy a flock agent and convert to a roost node: flock deploy -> roost convert")
+    end if
+
+    // Exploit the best result
+    ui.info("Best result on port " + str(bestEntry.port) + " (privilege: " + bestEntry.result.privilege + ") - exploiting...")
+    preExploitSessionCount = sessionManager.sessions.len
+    exploitResult = attackManager.exploit(publicIp, bestEntry.port, pubLanIp, routerPublic, null)
+
+    // Check if a new session was opened regardless of exploitResult error status
+    // Password-change exploits can return Error but still open a session via native password
+    newSessionOpened = sessionManager.sessions.len > preExploitSessionCount
+    if exploitResult isa Error then
+        if newSessionOpened then
+            ui.warning("Exploit note: " + exploitResult.message)
+            ui.info("Session was opened via native password read.")
+        else
+            ui.warning("Exploit failed: " + exploitResult.message)
+            ui.info("The exploit may have failed due to a password complexity issue.")
+
+            // No further automatic escalation attempts
+
+            if not newSessionOpened then
+                ui.info("Try: msfconsole " + publicIp + " " + str(bestEntry.port) + " to pick a different exploit.")
+                return
+            end if
+        end if
+    end if
+
+    // Explicitly set current session to the target (last opened session)
+    if newSessionOpened then
+        sessionManager.setCurrentSession(sessionManager.sessions[sessionManager.sessions.len - 1])
+    end if
+
+    entrySession = sessionManager.currentSession
+    entryPriv    = entrySession.handler.privilege()
+    ui.success("Entry gained as: " + entryPriv + " on " + publicIp)
+
+    // Offer AdminMonitor on public machine
+
+    // If not root on public target - ask what to do
+    if entryPriv != "root" and not hasLan then
+        answer = askStuck("public target", entryPriv, publicIp)
+        if answer == "1" then
+            runHarvest(publicIp, pubLanIp)
+            tryEscalate()
+            entryPriv = entrySession.handler.privilege()
+        else if answer == "3" then
+            ui.info("Use: msfconsole " + publicIp + " " + str(bestEntry.port))
+            return
+        else if answer == "4" then
+            ui.info("Stopping. Use sessions to review what we have.")
+            return
+        end if
+        // answer == "2" falls through to handoff
+    end if
+
+    // If we have root on public and no LAN target - harvest and go to handoff
+    if entryPriv == "root" and not hasLan then
+        runHarvest(publicIp, pubLanIp)
+    end if
+
+    // ════════════════════════════════════════════════════════════════════
+    // PHASE 3 — LAN PIVOT
+    // ════════════════════════════════════════════════════════════════════
+    lanSession = null
+    lanPriv    = "none"
+
+    if hasLan then
+        ui.print("")
+        ui.separator()
+        ui.highlight("PHASE 3 — LAN PIVOT (" + lanTarget + ")")
+        ui.separator()
+
+        // Harvest public machine first to get credentials
+        runHarvest(publicIp, pubLanIp)
+
+        // Try to load metaxploit from the compromised machine
+        ui.info("Looking for metaxploit.so on compromised machine...")
+        metaFile = entrySession.handler.getFile("/lib/metaxploit.so")
+        if metaFile isa Error then
+            metaFile = entrySession.handler.getFile("metaxploit.so")
+        end if
+        if not (metaFile isa Error) then
+            rawMeta = include_lib(metaFile.path())
+            if rawMeta != null then
+                ipData = {}
+                ipData.ip   = entrySession.data.ip
+                ipData.path = metaFile.path()
+                libManager.addLib(rawMeta, ipData)
+                ui.success("metaxploit.so loaded from compromised machine.")
+            end if
+        else
+            ui.warning("metaxploit.so not found on compromised machine - using Nest library.")
+        end if
+
+        // Scan the LAN target from inside the network
+        // Try to get router using the LAN target IP - this finds the correct
+        // internal router even if it is on a different subnet than the public machine
+        ui.info("Scanning LAN target " + lanTarget + "...")
+        lanRouter = Router.New(lanTarget)
+        if lanRouter isa Error then
+            ui.info("Could not reach router via LAN target IP, trying via public machine...")
+            lanRouter = Router.New(pubLanIp)
+        end if
+        if lanRouter isa Error then
+            lanRouter = Router.New(publicIp)
+        end if
+        if lanRouter isa Error then
+            ui.warning("Could not reach router for LAN scan: " + lanRouter.message)
+        else
+            lanDevices = lanRouter.devices()
+            lanPorts   = []
+            if not (lanDevices isa Error) then
+                for kv in lanDevices
+                    if kv.key == lanTarget then
+                        for port in kv.value
+                            if port.port > 0 then
+                                lanPorts.push(port)
+                            end if
+                        end for
+                    end if
+                end for
+            end if
+
+            if lanPorts.len == 0 then
+                ui.warning("No ports found on LAN target " + lanTarget + ".")
+                ui.info("It may not be directly reachable or has no open services.")
+            else
+                ui.success("Found " + str(lanPorts.len) + " port(s) on " + lanTarget)
+
+                // Scan all LAN ports
+                bestLan = scanAllPorts(publicIp, lanTarget, routerPublic, lanPorts)
+
+                if bestLan == null then
+                    ui.warning("No exploitable results on LAN target.")
+                    answer = askStuck("LAN target - no exploits", "none", lanTarget)
+                    if answer == "3" then
+                        ui.info("Use: msfconsole " + publicIp + " to browse exploits manually")
+                    else if answer == "4" then
+                        ui.info("Stopping at LAN recon. Use sessions to review.")
+                        return
+                    end if
+                else
+                    // Exploit best LAN result
+                    ui.info("Exploiting LAN target (port " + str(bestLan.port) + ", privilege: " + bestLan.result.privilege + ")...")
+                    lanExploit = attackManager.exploit(publicIp, bestLan.port, lanTarget, routerPublic, null)
+                    if lanExploit isa Error then
+                        ui.warning("LAN exploit failed: " + lanExploit.message)
+                        answer = askStuck("LAN target - exploit failed", "none", lanTarget)
+                        if answer == "3" then
+                            ui.info("Use: msfconsole " + publicIp + " " + str(bestLan.port))
+                            return
+                        else if answer == "4" then
+                            return
+                        end if
+                    else
+                        lanSession = sessionManager.currentSession
+                        lanPriv    = lanSession.handler.privilege()
+                        ui.success("LAN access gained as: " + lanPriv + " on " + lanTarget)
+
+                        // Offer AdminMonitor on LAN machine
+
+                        // Harvest LAN target
+                        runHarvest(publicIp, lanTarget)
+
+                        // If not root - ask
+                        if lanPriv != "root" then
+                            answer = askStuck("LAN target", lanPriv, lanTarget)
+                            if answer == "1" then
+                                tryEscalate()
+                                lanPriv = sessionManager.currentSession.handler.privilege()
+                            else if answer == "3" then
+                                ui.info("Use: msfconsole " + publicIp + " " + str(bestLan.port))
+                                return
+                            else if answer == "4" then
+                                return
+                            end if
+                        end if
+                    end if
+                end if
+            end if
+        end if
+    end if
+
+    // ════════════════════════════════════════════════════════════════════
+    // PHASE 4 — SUMMARY & HANDOFF
+    // ════════════════════════════════════════════════════════════════════
+    ui.print("")
+    ui.separator()
+    ui.highlight("ATTACK COMPLETE")
+    ui.separator()
+
+    stats = dbManager.stats()
+    finalPriv  = sessionManager.currentSession.handler.privilege()
+    finalLabel = sessionManager.currentSession.label
+
+    ui.print("")
+    ui.info("Public target  : " + publicIp + " (" + entryPriv + ")")
+    if hasLan then
+        ui.info("LAN target     : " + lanTarget + " (" + lanPriv + ")")
+    end if
+    ui.info("Current session: " + finalLabel + " as " + finalPriv)
+    ui.info("DB totals      : " + str(stats.credentials) + " creds, " + str(stats.persons) + " persons, " + str(stats.targets) + " targets")
+    ui.print("")
+    ui.sessions(sessionManager.listSessions())
+    ui.print("")
+
+    // Prompt to mark as owned - only if root AND SSH is open (useful for bounce network)
+    autoOwnCfg = configManager.get("autoOwn")
+    if autoOwnCfg isa Error then
+        autoOwnCfg = "1"
+    end if
+    if finalPriv == "root" and autoOwnCfg == "1" then
+        finalIpOwn = sessionManager.currentSession.data.ip.public
+        // Check if SSH port is open and forwarded before offering owned prompt
+        hasSsh = false
+        ownCheckTargets = dbManager.findTarget(finalIpOwn)
+        for ownTgt in ownCheckTargets
+            if ownTgt.hasIndex("ports") then
+                for ownPr in ownTgt.ports
+                    if ownPr.service == "ssh" and ownPr.forwarded then
+                        hasSsh = true
+                    end if
+                end for
+            end if
+        end for
+        if hasSsh then
+            ownAnswer = user_input("  Harvest complete. Mark " + finalIpOwn + " as owned for bounce network? (yes/no): ")
+            if ownAnswer.trim == "yes" or ownAnswer.trim == "y" then
+                ownTargets = dbManager.findTarget(finalIpOwn)
+                if ownTargets.len > 0 then
+                    dbManager.setTargetStatus(ownTargets[0].id, "owned")
+                else
+                    ownData = {}
+                    ownData.public_ip = finalIpOwn
+                    ownData.lan_ip    = sessionManager.currentSession.data.ip.local
+                    ownData.status    = "owned"
+                    dbManager.upsertTarget(ownData)
+                end if
+                dbManager.save()
+                ui.success("Marked as owned. Run 'bounces update' to add to bounce network.")
+            end if
+            ui.print("")
+        end if
+    end if
+
+    ui.info("Session open. Run harvest, lannmap, escalate, or leave when done.")
+    ui.separator()
+end function
+commandManager.register(_cmd)

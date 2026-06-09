@@ -1,0 +1,22 @@
+// ============================================================
+// CORVID 2.0 | libs/error
+// Typed error object. Replaces null/string error returns
+// throughout the entire codebase.
+// ============================================================
+
+Error = {}
+Error.message = null
+Error.code = null
+Error.New = function(message, code)
+    result = new Error
+    result.message = message
+    if code == null then
+        result.code = "GENERIC"
+    else
+        result.code = code
+    end if
+    return result
+end function
+Error.toString = function()
+    return "[ERROR:" + self.code + "] " + self.message
+end function

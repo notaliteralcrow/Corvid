@@ -834,8 +834,9 @@ IntelManager.harvestAll = function(publicIp, lanIp, forceSkipPasswd)
     end if
 
     // ── Mail files ────────────────────────────────────────────────────────
-    // Always check by public IP - LAN IPs like 192.168.0.2 are shared across
-    // many unrelated machines and cause false positive skips
+    // Check by both public IP and LAN IP — a flock/roost session on a LAN
+    // machine may share a public IP with other machines already harvested.
+    // Only skip if mail records exist specifically for this LAN machine.
     mailCreds = 0
     mailCredsForIp = dbManager.findCredentialsByIp(publicIp)
     for ec in mailCredsForIp
@@ -845,7 +846,14 @@ IntelManager.harvestAll = function(publicIp, lanIp, forceSkipPasswd)
                 ecSource = ec.source
             end if
             if ecSource != ""routerattack"" and ecSource != ""routerattack_file"" then
-                mailCreds = mailCreds + 1
+                // Only count if record matches this specific LAN machine (or no LAN info)
+                ecLan = """"
+                if ec.hasIndex(""lan_ip"") then
+                    ecLan = ec.lan_ip
+                end if
+                if ecLan == """" or ecLan == lanIp or lanIp == """" then
+                    mailCreds = mailCreds + 1
+                end if
             end if
         end if
     end for
@@ -864,7 +872,6 @@ IntelManager.harvestAll = function(publicIp, lanIp, forceSkipPasswd)
     end if
 
     // ── Bank files ────────────────────────────────────────────────────────
-    // Always check by public IP for same reason as mail
     bankCreds = 0
     for ec in mailCredsForIp
         if ec.type == ""bank"" then
@@ -873,7 +880,13 @@ IntelManager.harvestAll = function(publicIp, lanIp, forceSkipPasswd)
                 ecSource = ec.source
             end if
             if ecSource != ""routerattack"" and ecSource != ""routerattack_file"" then
-                bankCreds = bankCreds + 1
+                ecLan = """"
+                if ec.hasIndex(""lan_ip"") then
+                    ecLan = ec.lan_ip
+                end if
+                if ecLan == """" or ecLan == lanIp or lanIp == """" then
+                    bankCreds = bankCreds + 1
+                end if
             end if
         end if
     end for
@@ -1575,6 +1588,7 @@ AttackManager.escalate = function()
                             dbManager.upsertCredential(credUpdate3)
                             dbManager.save()
                             ui.success(""Escalated to root via Clover Method"")
+                            ui.warning(""Clover Method creates a log entry on the target. Run corruptlogs to clean up."")
                             return newSess3
                         end if
                     else
@@ -3319,59 +3333,98 @@ end function
 // Scan all libs on current session, stage any shiny ones.
 // Returns list of shiny results found.
 ShinyLibsManager.scanSession = function(sessionHandler, metaxploit)
-    ui = self.mediator.getExtension(""corvidUi"")
-    found = []
-
-    comp = sessionHandler.shell.shell.host_computer
-    libFolder = comp.File(""/lib"")
-    if libFolder == null or not libFolder.is_folder then
-        return found
-    end if
-
-    libFiles = libFolder.get_files
-    if libFiles == null then
-        return found
-    end if
-
-    for libFile in libFiles
-        if libFile.name.indexOf("".so"") == null then
-            continue
-        end if
-        shinyType = self.checkLib(libFile, metaxploit)
-        if shinyType != null then
-            found.push({""libName"": libFile.name, ""shinyType"": shinyType})
-        end if
-    end for
-
-    return found
+    // Stub — not used. Real scanning happens via rescan (netUse-based).
+    return []
 end function
 
 // ── checkLib ─────────────────────────────────────────────────
-// Load one lib, score it, stage if shiny. Returns shinyType or null.
+// Score a lib via exploit texts already collected. Returns shinyType or null.
 ShinyLibsManager.checkLib = function(libFile, metaxploit)
-    // Pass the raw file object directly to metaxploit.load() —
-    // accepts a file object from any machine, not just a local path string.
-    metalib = metaxploit.load(libFile)
-    if metalib == null or metalib isa Error then
-        return null
+    // Static load cannot determine exploit result types — see rescan instead.
+    // This stub kept for compatibility.
+    return null
+end function
+
+// ── rescan ───────────────────────────────────────────────────
+// Active rescan via netUse on all forwarded ports of the target.
+// Routes from Nest — Nest IP will appear in target logs.
+// Run corruptlogs afterwards.
+ShinyLibsManager.rescan = function(publicIp, lanIp)
+    ui         = self.mediator.getExtension(""corvidUi"")
+    dbManager  = self.mediator.getExtension(""databaseManager"")
+    metaxMgr   = self.mediator.getExtension(""metaxploitManager"")
+
+    metaxploit = metaxMgr.getMetaxploit()
+    if metaxploit isa Error then
+        ui.warning(""metaxploit not available"")
+        return
     end if
 
-    version     = metalib.version
-    libName     = libFile.name
-    memAddrs    = metaxploit.scan(metalib)
-    if memAddrs == null then
-        memAddrs = []
+    ui.warning(""Active rescan routes from your Nest — your Nest IP will be logged on the target."")
+    ui.warning(""Run corruptlogs on the target afterwards to clean up."")
+    ui.info(""Rescanning ports on "" + publicIp + "" via netUse..."")
+
+    // Get known ports from DB
+    targets = dbManager.findTarget(publicIp)
+    if targets.len == 0 then
+        ui.warning(""No port data for "" + publicIp + "" in DB — run nmap first"")
+        return
     end if
 
-    exploitTexts = []
-    for addr in memAddrs
-        txt = metaxploit.scanAddress(metalib, addr)
-        if txt != null then
-            exploitTexts.push(txt)
+    ports = []
+    for p in targets[0].ports
+        if p.forwarded and p.port > 0 then
+            ports.push(p)
         end if
     end for
 
-    return self.db.stage(libName, version, exploitTexts, libFile.path)
+    if ports.len == 0 then
+        ui.warning(""No forwarded ports found for "" + publicIp)
+        return
+    end if
+
+    found = 0
+    for portRec in ports
+        ui.dim(""  Port "" + str(portRec.port) + "" ("" + portRec.service + "" v"" + portRec.version + "")..."")
+        netSess = metaxploit.net_use(publicIp, portRec.port)
+        if netSess == null then
+            continue
+        end if
+
+        rawLib = netSess.dump_lib()
+        if rawLib == null then
+            continue
+        end if
+
+        libName    = rawLib.lib_name
+        libVersion = rawLib.version
+        addrs      = metaxploit.scan(rawLib)
+        if addrs == null then
+            addrs = []
+        end if
+
+        exploitTexts = []
+        for addr in addrs
+            txt = metaxploit.scan_address(rawLib, addr)
+            if txt == null then
+                continue
+            end if
+            exploitTexts.push(txt)
+        end for
+
+        staged = self.db.stage(libName, libVersion, exploitTexts, ""/lib/"" + libName)
+        if staged != null then
+            found = found + 1
+            ui.success(""  Staged: "" + libName + "" v"" + libVersion + "" ["" + staged + ""]"")
+        end if
+    end for
+
+    if found > 0 then
+        self.showStagedNotification()
+    else
+        ui.info(""No new shiny libs found."")
+    end if
+    ui.warning(""Nest IP logged on "" + publicIp + "" — run corruptlogs to clean up."")
 end function
 
 // ── showStagedNotification ────────────────────────────────────
@@ -3515,6 +3568,32 @@ ShinyLibsManager.collectStaged = function(sessionHandler, pivotHandler)
         else
             ui.success(""Collected "" + staged.libName + "" v"" + staged.version + "" -> "" + localPath)
             collected = collected + 1
+            // Update flat vuln/harden folders
+            vulnDir   = self.db.dataPath + ""/vuln""
+            hardenDir = self.db.dataPath + ""/harden""
+            self.ensureDir(pivotComp, vulnDir)
+            self.ensureDir(pivotComp, hardenDir)
+            bestOff = self.db.getBestForLib(staged.libName)
+            bestDef = self.db.getMostSecureForLib(staged.libName)
+            collectedFile = pivotComp.File(localPath)
+            if collectedFile != null then
+                if bestOff != null and bestOff.version == staged.version then
+                    existingVuln = pivotComp.File(vulnDir + ""/"" + staged.libName)
+                    if existingVuln != null then
+                        existingVuln.delete
+                    end if
+                    collectedFile.copy(vulnDir)
+                    ui.dim(""  -> "" + vulnDir + ""/"" + staged.libName + "" (vuln)"")
+                end if
+                if bestDef != null and bestDef.version == staged.version then
+                    existingHarden = pivotComp.File(hardenDir + ""/"" + staged.libName)
+                    if existingHarden != null then
+                        existingHarden.delete
+                    end if
+                    collectedFile.copy(hardenDir)
+                    ui.dim(""  -> "" + hardenDir + ""/"" + staged.libName + "" (harden)"")
+                end if
+            end if
         end if
     end for
 
@@ -3695,6 +3774,7 @@ ShinyLibsManager.put = function(mode, sessionHandler, pivotHandler)
 
     sessionComp = sessionHandler.shell.shell.host_computer
     pivotShell  = pivotHandler.shell.shell
+    pivotComp   = pivotShell.host_computer
 
     // Get existing libs on target
     libFolder = sessionComp.File(""/lib"")
@@ -3803,8 +3883,15 @@ ShinyLibsManager.put = function(mode, sessionHandler, pivotHandler)
             end if
         end if
 
-        // SCP from Nest to target
-        scpResult = pivotShell.scp(candidate.localPath, ""/lib"", sessionHandler.shell.shell)
+        // SCP from Nest to target — prefer flat folder, fall back to versioned path
+        flatDir = self.db.dataPath + ""/"" + mode
+        flatPath = flatDir + ""/"" + candidate.libName
+        flatFile = pivotComp.File(flatPath)
+        srcPath = candidate.localPath
+        if flatFile != null then
+            srcPath = flatPath
+        end if
+        scpResult = pivotShell.scp(srcPath, ""/lib"", sessionHandler.shell.shell)
         if typeof(scpResult) == ""string"" and scpResult.len > 0 then
             ui.warning(""SCP failed for "" + libName + "": "" + scpResult)
             skipped = skipped + 1
@@ -3845,153 +3932,5 @@ end function
 
 ShinyLibsManager.setMediator = function(mediator)
     self.mediator = mediator
-end function
-",1)
-m("/Corvid/asriN/managers/macro-manager.txt","// ============================================================
-// CORVID | managers/macro/macro-manager
-// Stores and executes macro scripts.
-// Macros live in /Config/Macros/ on the pivot session.
-// The 'init' macro runs automatically on startup.
-// Trigger any macro mid-session with @macroname.
-// ============================================================
-
-MacroManager = {}
-MacroManager.mediator = null
-
-MacroManager.getMacroFolder = function()
-    sessionManager = self.mediator.getExtension(""sessionManager"")
-    handler        = sessionManager.pivotSession.handler
-
-    user   = handler.user
-    cfgPath = ""/home/guest/Config""
-    if user == ""root"" then
-        cfgPath = ""/root/Config""
-    else if user != ""guest"" then
-        cfgPath = ""/home/"" + user + ""/Config""
-    end if
-
-    folder = handler.getFile(cfgPath)
-    if folder isa Error then
-        return folder
-    end if
-
-    macroFolder = handler.getFile(cfgPath + ""/Macros"")
-    if macroFolder isa Error then
-        result = handler.createFolder(cfgPath + ""/Macros"")
-        if result isa Error then
-            return result
-        end if
-        macroFolder = handler.getFile(cfgPath + ""/Macros"")
-        if macroFolder isa Error then
-            return macroFolder
-        end if
-    end if
-
-    return macroFolder
-end function
-
-MacroManager.getMacro = function(name)
-    folder = self.getMacroFolder()
-    if folder isa Error then
-        return folder
-    end if
-    macro = folder.child(name)
-    if macro isa Error then
-        return Error.New(""Macro not found: "" + name, ""NOT_FOUND"")
-    end if
-    content = macro.content()
-    if content isa Error then
-        return content
-    end if
-    return content
-end function
-
-MacroManager.runMacro = function(name)
-    commandManager = self.mediator.getExtension(""commandManager"")
-    content = self.getMacro(name)
-    if content isa Error then
-        return content
-    end if
-    lines = content.split(char(10))
-    for line in lines
-        trimmed = line.trim
-        if trimmed.len == 0 then
-            continue
-        end if
-        if startsWith(trimmed, ""//"") then
-            continue
-        end if
-        commandManager.execute(trimmed)
-        commandManager.run()
-    end for
-end function
-
-MacroManager.init = function()
-    // Run init macro if it exists  -  silently skip if not
-    macro = self.getMacro(""init"")
-    if macro isa Error then
-        return
-    end if
-    self.runMacro(""init"")
-end function
-
-MacroManager.listMacros = function()
-    folder = self.getMacroFolder()
-    if folder isa Error then
-        return []
-    end if
-    kids = folder.children()
-    if kids isa Error then
-        return []
-    end if
-    names = []
-    for kid in kids
-        names.push(kid.name())
-    end for
-    return names
-end function
-
-MacroManager.saveMacro = function(name, content)
-    folder = self.getMacroFolder()
-    if folder isa Error then
-        return folder
-    end if
-    sessionManager = self.mediator.getExtension(""sessionManager"")
-    handler        = sessionManager.pivotSession.handler
-
-    existing = folder.child(name)
-    if existing isa Error then
-        result = handler.createFile(folder.path() + ""/"" + name)
-        if result isa Error then
-            return result
-        end if
-    end if
-
-    file = handler.getFile(folder.path() + ""/"" + name)
-    if file isa Error then
-        return file
-    end if
-    return file.setContent(content)
-end function
-
-MacroManager.deleteMacro = function(name)
-    folder = self.getMacroFolder()
-    if folder isa Error then
-        return folder
-    end if
-    macro = folder.child(name)
-    if macro isa Error then
-        return Error.New(""Macro not found: "" + name, ""NOT_FOUND"")
-    end if
-    return macro.delete()
-end function
-
-MacroManager.setMediator = function(mediator)
-    self.mediator = mediator
-end function
-
-MacroManager.New = function()
-    result = new MacroManager
-    return result
 end function
 ",1)

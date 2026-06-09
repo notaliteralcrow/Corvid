@@ -1,0 +1,38 @@
+// ============================================================
+// CORVID 2.0 | libs/ssv
+// Space-separated value parser.
+// Used for parsing show_procs and similar game output.
+// ============================================================
+
+ssvToList = function(csv)
+    lineSplitter = function(line)
+        return line.split(" ")
+    end function
+    lines = map(csv.split(char(10)), @lineSplitter)
+
+    names = []
+    firstLine = lines.pull()
+    for item in firstLine
+        if item.len > 0 then
+            names.push(item)
+        end if
+    end for
+
+    result = []
+    for line in lines
+        if line.len == 0 then
+            continue
+        end if
+        row = {}
+        for i in range(0, names.len - 1)
+            if line.hasIndex(i) then
+                row[names[i]] = line[i]
+            else
+                row[names[i]] = ""
+            end if
+        end for
+        result.push(row)
+    end for
+
+    return result
+end function

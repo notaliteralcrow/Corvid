@@ -1,27 +1,19 @@
 CORVID — INSTALLATION
 =========================
 
-STEP 1 — Run installer scripts 0-7 in Code Editor
+STEP 1 — Run installer scripts 0-8 in Code Editor
 ---------------------------------------------------
 Run each in order. For each: open in Code Editor, Save, Build, Run.
 Wait for completion before starting the next.
 
-  installer0.src  through  installer6.src  — write source files
-  installer7.src  — builds /Corvid/corvid binary
+  installer0.src  through  installer8.src  — write all source and tool files
+  installer9.src  — builds /Corvid/corvid binary
 
-You will see: "Build successful! Run /Corvid/corvid"
-
-
-STEP 2 — Copy tools folder manually via FileExplorer
------------------------------------------------------
-  tools/node-attacker.src    ->  /Corvid/tools/node-attacker.src
-  tools/node-router.src      ->  /Corvid/tools/node-router.src
-  tools/csniffer.src         ->  /Corvid/tools/csniffer.src
-  tools/rot.src              ->  /Corvid/tools/rot.src
-  tools/chainsaw/            ->  /Corvid/tools/chainsaw/   (whole folder)
+All source files, tools, and chainsaw data are written automatically.
+No manual file copying required.
 
 
-STEP 3 — Launch Corvid and build tool binaries
+STEP 2 — Launch Corvid and build tool binaries
 -----------------------------------------------
   /Corvid/corvid
   platform build    <- compiles node-attacker and node-router

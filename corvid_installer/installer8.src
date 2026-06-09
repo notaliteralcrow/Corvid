@@ -1,0 +1,1022 @@
+s = get_shell;c = s.host_computer;m = function(filePath, content, isNew);    segments = filePath.split("/")[1:];    fileName = segments.pop;    for segment in segments;        __segment_idx = segments.indexOf(segment);        parentPath = "/" + segments[:__segment_idx].join("/");        if parentPath == "/" then;            folderPath = "/" + segment;        else;            folderPath = parentPath + "/" + segment;        end if;        folderHandle = c.File(folderPath);        if folderHandle == null then;            result = c.create_folder(parentPath, segment);            if result != 1 then;                exit("Could not create folder: " + folderPath);            end if;        end if;    end for;    parentPath = "/" + segments.join("/");    fileEntity = c.File(filePath);    if fileEntity == null then;        result = c.touch(parentPath, fileName);        if result != 1 then;            exit("Could not create file: " + filePath);        end if;        fileEntity = c.File(filePath);    end if;    if isNew then;        fileEntity.set_content(content);        print("Written: " + filePath);    else;        fileEntity.set_content(fileEntity.get_content + content);        print("Appended: " + filePath);    end if;end function
+m("/Corvid/tools/node-router.src","// ============================================================
+// CORVID | node-router
+// Standalone router attack script for platform mode.
+// Runs on a remote node. No import_code.
+//
+// Reads job from /tmp/corvid-router-job.json
+// Writes results to /tmp/corvid-router-results.json
+//
+// Job file format:
+// {
+//   target_ip:   ""x.x.x.x""
+//   lan_ip:      ""x.x.x.x"" or """"
+//   kb_entries:  [{lib_name, lib_version, address, exploit}]
+//   nest_ip:     ""x.x.x.x""
+//   nest_port:   1222
+//   flock_src:   ""...source code...""
+//   meta_path:   ""/lib/metaxploit.so""
+//   crypto_path: ""/lib/crypto.so""
+//   user:        ""root"" or """"
+//   pass:        ""password"" or """"
+// }
+// ============================================================
+
+// ============================================================
+// CORVID | libs/json
+// JSON parse and serialize.
+// Sourced from the MiniScript community standard library.
+// ============================================================
+
+parse = function(jsonString)
+    p = new Parser
+    return p.parse(jsonString)
+end function
+
+
+
+_unescapeStr = function(s)
+    chars = []
+    i = 0
+    maxi = s.len
+    while i < maxi
+        di = 1
+        if s[i] == char(92) then
+            di = 2
+            c = s[i + 1]
+            if c == ""b"" then
+                chars.push(char(8))
+            else if c == ""t"" then
+                chars.push(char(9))
+            else if c == ""n"" then
+                chars.push(char(10))
+            else if c == ""f"" then
+                chars.push(char(12))
+            else if c == ""r"" then
+                chars.push(char(13))
+            else if c == ""u"" then
+                hex = s[i + 2 : i + 6]
+                chars.push(char(_hexToInt(hex)))
+                di = 6
+            else
+                chars.push(c)
+            end if
+        else
+            chars.push(s[i])
+        end if
+        i = i + di
+    end while
+    return chars.join("""")
+end function
+
+_hexToInt = function(s)
+    result = 0
+    for c in s
+        result = result * 16 + _hexDigitMap[c]
+    end for
+    return result
+end function
+
+
+
+_hexDigitMap = {}
+for _i in range(0, 15)
+    if _i < 10 then
+        _hexDigitMap[str(_i)] = _i
+    else
+        _hexDigitMap[char(55 + _i)] = _i
+        _hexDigitMap[char(87 + _i)] = _i
+    end if
+end for
+// escape arrays removed - _escapeStr now char-by-char
+
+_whitespace = "" "" + char(9) + char(10) + char(13)
+
+Parser = {}
+Parser.source = """"
+Parser._sourceLen = 0
+Parser._p = 0
+Parser.init = function(source)
+    self.source = source
+    self._sourceLen = source.len
+end function
+Parser.parse = function(source)
+    if source != null then
+        self.init(source)
+    end if
+    self._p = 0
+    return self._parseElement
+end function
+Parser._skipWhitespace = function()
+    while self._p < self._sourceLen
+        if _whitespace.indexOf(self.source[self._p]) == null then
+            break
+        end if
+        self._p = self._p + 1
+    end while
+end function
+Parser._parseElement = function()
+    return self._parseValue
+end function
+Parser._parseValue = function()
+    self._skipWhitespace
+    c = self.source[self._p]
+    if c == """""""" then
+        return self._parseString
+    end if
+    if ""0123456789-."".indexOf(c) != null then
+        return self._parseNumber
+    end if
+    if c == ""["" then
+        return self._parseList
+    end if
+    if c == ""{"" then
+        return self._parseMap
+    end if
+    if c == ""t"" and self.source[self._p : self._p + 4] == ""true"" then
+        self._p = self._p + 4
+        return true
+    end if
+    if c == ""f"" and self.source[self._p : self._p + 5] == ""false"" then
+        self._p = self._p + 5
+        return false
+    end if
+    if c == ""n"" and self.source[self._p : self._p + 4] == ""null"" then
+        self._p = self._p + 4
+        return null
+    end if
+end function
+Parser._parseList = function()
+    self._p = self._p + 1
+    self._skipWhitespace
+    result = []
+    while self._p < self._sourceLen
+        c = self.source[self._p]
+        if c == ""]"" then
+            break
+        end if
+        result.push(self._parseElement)
+        self._skipWhitespace
+        c = self.source[self._p]
+        if c == "","" then
+            self._p = self._p + 1
+            self._skipWhitespace
+        end if
+    end while
+    self._p = self._p + 1
+    return result
+end function
+Parser._parseMap = function()
+    self._p = self._p + 1
+    self._skipWhitespace
+    result = {}
+    while self._p < self._sourceLen
+        c = self.source[self._p]
+        if c == ""}"" then
+            break
+        end if
+        if c != """""""" then
+            self._p = self._p + 1
+        else
+            key = self._parseString
+            self._skipWhitespace
+            if self.source[self._p] != "":"" then
+                self._p = self._p + 1
+            else
+                self._p = self._p + 1
+                self._skipWhitespace
+                value = self._parseElement
+                result[key] = value
+                self._skipWhitespace
+                c = self.source[self._p]
+                if c == "","" then
+                    self._p = self._p + 1
+                    self._skipWhitespace
+                end if
+            end if
+        end if
+    end while
+    self._p = self._p + 1
+    return result
+end function
+Parser._parseString = function()
+    self._p = self._p + 1
+    startPos = self._p
+    anyEscape = false
+    while self._p < self._sourceLen
+        c = self.source[self._p]
+        self._p = self._p + 1
+        if c == """""""" then
+            break
+        end if
+        if c == char(92) then
+            anyEscape = true
+            self._p = self._p + 1
+        end if
+    end while
+    result = self.source[startPos : self._p - 1]
+    if anyEscape then
+        result = _unescapeStr(result)
+    end if
+    return result
+end function
+Parser._parseNumber = function()
+    startPos = self._p
+    while self._p < self._sourceLen
+        c = self.source[self._p]
+        if ""0123456789+-.eE"".indexOf(c) == null then
+            break
+        end if
+        self._p = self._p + 1
+    end while
+    return val(self.source[startPos : self._p])
+end function
+
+// ── Load job file ─────────────────────────────────────────────
+comp = get_shell.host_computer
+jobFile = comp.File(""/shiny/corvid-router-job.json"")
+if jobFile == null then
+    exit(""node-router: job file not found"")
+end if
+jobRaw = jobFile.get_content
+if jobRaw == null or jobRaw.len == 0 then
+    exit(""node-router: job file empty"")
+end if
+parsed = parse(jobRaw)
+if parsed == null then
+    exit(""node-router: could not parse job file"")
+end if
+job = parsed
+
+targetIp   = """"
+lanIp      = """"
+metaPath   = ""/lib/metaxploit.so""
+cryptoPath = ""/lib/crypto.so""
+nestIp     = """"
+nestPort   = 1222
+flockSrc   = """"
+jobUser    = """"
+jobPass    = """"
+kbEntries  = []
+
+if job.hasIndex(""target_ip"") then
+    targetIp = job.target_ip
+end if
+if job.hasIndex(""lan_ip"") then
+    lanIp = job.lan_ip
+end if
+if job.hasIndex(""meta_path"") then
+    metaPath = job.meta_path
+end if
+if job.hasIndex(""crypto_path"") then
+    cryptoPath = job.crypto_path
+end if
+if job.hasIndex(""nest_ip"") then
+    nestIp = job.nest_ip
+end if
+if job.hasIndex(""nest_port"") then
+    nestPort = job.nest_port
+end if
+if job.hasIndex(""flock_src"") then
+    flockSrc = job.flock_src
+end if
+if job.hasIndex(""user"") then
+    jobUser = job.user
+end if
+if job.hasIndex(""pass"") then
+    jobPass = job.pass
+end if
+if job.hasIndex(""kb_entries"") then
+    kbEntries = job.kb_entries
+end if
+
+if targetIp.len == 0 then
+    exit(""node-router: no target IP in job"")
+end if
+
+// ── Load libraries ────────────────────────────────────────────
+meta = include_lib(metaPath)
+if meta == null then
+    meta = include_lib(""/lib/metaxploit.so"")
+end if
+if meta == null then
+    exit(""node-router: metaxploit not available"")
+end if
+
+crypto = null
+if cryptoPath.len > 0 then
+    crypto = include_lib(cryptoPath)
+end if
+if crypto == null then
+    crypto = include_lib(""/lib/crypto.so"")
+end if
+
+// ── Result structure ──────────────────────────────────────────
+results = {}
+results.target_ip      = targetIp
+results.lan_ip         = lanIp
+results.result_type    = ""none""
+results.flock_deployed = false
+results.credentials    = []
+results.persons        = []
+results.kb_entries     = []
+results.error          = """"
+
+// ── Helper: write results ─────────────────────────────────────
+writeResults = function()
+    comp.touch(""/shiny"", ""corvid-router-results.json"")
+    resFile = comp.File(""/shiny/corvid-router-results.json"")
+    if resFile != null then
+        resFile.set_content(toJSON(results))
+    end if
+end function
+
+// ── Helper: deploy flock from a shell ─────────────────────────
+deployFlock = function(targetShell)
+    if nestIp.len == 0 then
+        return false
+    end if
+    if flockSrc.len == 0 then
+        return false
+    end if
+    tComp = targetShell.host_computer
+    wp = null
+    for candidate in [""/root"", ""/home/guest"", ""/shiny""]
+        f = tComp.File(candidate)
+        if f != null and f.has_permission(""w"") then
+            wp = candidate
+        end if
+    end for
+    if wp == null then
+        return false
+    end if
+    tComp.touch(wp, ""flock.src"")
+    srcF = tComp.File(wp + ""/flock.src"")
+    if srcF == null then
+        return false
+    end if
+    srcF.set_content(flockSrc)
+    buildRes = targetShell.build(wp + ""/flock.src"", wp)
+    if typeof(buildRes) == ""string"" and buildRes.len > 0 then
+        srcF.delete()
+        return false
+    end if
+    srcF2 = tComp.File(wp + ""/flock.src"")
+    if srcF2 != null then
+        srcF2.delete()
+    end if
+    targetShell.launch(wp + ""/flock"")
+    return true
+end function
+
+// ── Helper: attempt Clover Method on target ───────────────────
+tryClover = function(targetShell, username, password)
+    tComp = targetShell.host_computer
+    wp = null
+    for candidate in [""/root"", ""/home/guest"", ""/shiny""]
+        f = tComp.File(candidate)
+        if f != null and f.has_permission(""w"") then
+            wp = candidate
+        end if
+    end for
+    if wp == null then
+        return null
+    end if
+    q = char(34)
+    csrc = ""cob = get_custom_object"" + char(10)
+    csrc = csrc + ""cob.shell = get_shell("" + q + username + q + "", "" + q + password + q + "")""
+    tComp.touch(wp, ""csudo.src"")
+    sf = tComp.File(wp + ""/csudo.src"")
+    if sf == null then
+        return null
+    end if
+    sf.set_content(csrc)
+    br = targetShell.build(wp + ""/csudo.src"", wp)
+    if typeof(br) == ""string"" and br.len > 0 then
+        sf.delete()
+        return null
+    end if
+    sf2 = tComp.File(wp + ""/csudo.src"")
+    if sf2 != null then
+        sf2.delete()
+    end if
+    targetShell.launch(wp + ""/csudo"")
+    cob = get_custom_object
+    bin = tComp.File(wp + ""/csudo"")
+    if bin != null then
+        bin.delete()
+    end if
+    if cob.hasIndex(""shell"") and typeof(cob.shell) == ""shell"" then
+        return cob.shell
+    end if
+    return null
+end function
+decipherHash = function(hash)
+    if crypto == null then
+        return """"
+    end if
+    dec = crypto.decipher(hash)
+    if dec == null then
+        return """"
+    end if
+    return dec
+end function
+
+// ── Helper: harvest computer result ──────────────────────────
+harvestComputer = function(comp2)
+    // Extract mail credentials
+    homeFolder = comp2.File(""/home"")
+    if homeFolder != null then
+        ufList = homeFolder.get_folders()
+        if ufList != null then
+            for uf in ufList
+                mf = comp2.File(""/home/"" + uf.name + ""/Config/Mail.txt"")
+                if mf == null then
+                    continue
+                end if
+                if not mf.has_permission(""r"") then
+                    continue
+                end if
+                raw = mf.get_content
+                if raw == null or raw.len == 0 then
+                    continue
+                end if
+                for mailLine in raw.split(char(10))
+                    if mailLine.len == 0 then
+                        continue
+                    end if
+                    colonIdx = mailLine.indexOf("":"")
+                    atIdx    = mailLine.indexOf(""@"")
+                    if colonIdx == null or atIdx == null then
+                        continue
+                    end if
+                    if atIdx >= colonIdx then
+                        continue
+                    end if
+                    eAddr = mailLine[:colonIdx].trim
+                    eHash = mailLine[colonIdx + 1:].trim
+                    if eAddr.len == 0 or eHash.len == 0 then
+                        continue
+                    end if
+                    ePass = decipherHash(eHash)
+                    cred = {}
+                    cred.type      = ""mail""
+                    cred.username  = eAddr
+                    cred.password  = ePass
+                    cred.source    = ""platform_routerattack""
+                    results.credentials.push(cred)
+                    person = {}
+                    person.username = uf.name
+                    person.email    = eAddr
+                    results.persons.push(person)
+                end for
+
+                // Bank
+                bf = comp2.File(""/home/"" + uf.name + ""/Config/Bank.txt"")
+                if bf != null and bf.has_permission(""r"") then
+                    rawB = bf.get_content
+                    if rawB != null and rawB.len > 0 then
+                        bankStr  = rawB.trim
+                        bankNum  = bankStr
+                        bankPass = """"
+                        colonIdxB = bankStr.indexOf("":"")
+                        if colonIdxB != null then
+                            bankNum  = bankStr[:colonIdxB]
+                            bankHash = bankStr[colonIdxB + 1:]
+                            bankPass = decipherHash(bankHash)
+                        end if
+                        bcred = {}
+                        bcred.type        = ""bank""
+                        bcred.username    = uf.name
+                        bcred.password    = bankPass
+                        bcred.bank_number = bankNum
+                        bcred.source      = ""platform_routerattack""
+                        results.credentials.push(bcred)
+                    end if
+                end if
+            end for
+        end if
+    end if
+
+    // Extract passwd
+    pf = comp2.File(""/etc/passwd"")
+    if pf != null and pf.has_permission(""r"") then
+        rawP = pf.get_content
+        if rawP != null and rawP.len > 0 then
+            rootPass = decipherHash(rawP)
+            if rootPass.len > 0 then
+                pcred = {}
+                pcred.type     = ""system""
+                pcred.username = ""root""
+                pcred.password = rootPass
+                pcred.source   = ""platform_routerattack_passwd""
+                results.credentials.push(pcred)
+            end if
+        end if
+    end if
+end function
+
+// ── Helper: harvest file result ───────────────────────────────
+harvestFile = function(fileResult)
+    // Walk up to root
+    rootF = fileResult
+    safetyCount = 0
+    while rootF.path != ""/"" and safetyCount < 10
+        rootF = rootF.parent
+        safetyCount = safetyCount + 1
+    end while
+
+    // Try /etc/passwd
+    etcF = null
+    for rf in rootF.get_folders()
+        if rf.path == ""/etc"" then
+            etcF = rf
+        end if
+    end for
+    if etcF != null then
+        for ef in etcF.get_files()
+            if ef.name != ""passwd"" then
+                continue
+            end if
+            if not ef.has_permission(""r"") then
+                continue
+            end if
+            rawPwd = ef.get_content
+            if rawPwd != null and rawPwd.len > 0 then
+                rootPwd = decipherHash(rawPwd)
+                if rootPwd.len > 0 then
+                    pcred = {}
+                    pcred.type     = ""system""
+                    pcred.username = ""root""
+                    pcred.password = rootPwd
+                    pcred.source   = ""platform_routerattack_file""
+                    results.credentials.push(pcred)
+                end if
+            end if
+        end for
+    end if
+
+    // Walk /home for mail and bank
+    homeF2 = null
+    if fileResult.path == ""/home"" then
+        homeF2 = fileResult
+    else
+        for rf3 in rootF.get_folders()
+            if rf3.path == ""/home"" then
+                homeF2 = rf3
+            end if
+        end for
+    end if
+
+    if homeF2 == null then
+        return
+    end if
+
+    ufList2 = homeF2.get_folders()
+    if ufList2 == null then
+        return
+    end if
+
+    for uf2 in ufList2
+        person = {}
+        person.username = uf2.name
+        subFolders2 = uf2.get_folders()
+        if subFolders2 == null then
+            continue
+        end if
+        for sf2 in subFolders2
+            if sf2.name != ""Config"" then
+                continue
+            end if
+            sfFiles2 = sf2.get_files()
+            if sfFiles2 == null then
+                continue
+            end if
+            for mf2 in sfFiles2
+                if mf2.name == ""Mail.txt"" and mf2.has_permission(""r"") then
+                    rawMail2 = mf2.get_content
+                    if rawMail2 != null and rawMail2.len > 0 then
+                        for ml2 in rawMail2.split(char(10))
+                            if ml2.len == 0 then
+                                continue
+                            end if
+                            ci2 = ml2.indexOf("":"")
+                            ai2 = ml2.indexOf(""@"")
+                            if ci2 == null or ai2 == null or ai2 >= ci2 then
+                                continue
+                            end if
+                            mEmail2 = ml2[:ci2].trim
+                            mHash2  = ml2[ci2 + 1:].trim
+                            if mEmail2.len == 0 then
+                                continue
+                            end if
+                            mPass2 = decipherHash(mHash2)
+                            mcred = {}
+                            mcred.type     = ""mail""
+                            mcred.username = mEmail2
+                            mcred.password = mPass2
+                            mcred.source   = ""platform_routerattack_file""
+                            results.credentials.push(mcred)
+                            person.email = mEmail2
+                        end for
+                    end if
+                end if
+                if mf2.name == ""Bank.txt"" and mf2.has_permission(""r"") then
+                    rawBank2 = mf2.get_content
+                    if rawBank2 != null and rawBank2.len > 0 then
+                        bStr2    = rawBank2.trim
+                        bNum2    = bStr2
+                        bPass2   = """"
+                        bColon   = bStr2.indexOf("":"")
+                        if bColon != null then
+                            bNum2  = bStr2[:bColon]
+                            bHash2 = bStr2[bColon + 1:]
+                            bPass2 = decipherHash(bHash2)
+                        end if
+                        bcred2 = {}
+                        bcred2.type        = ""bank""
+                        bcred2.username    = uf2.name
+                        bcred2.password    = bPass2
+                        bcred2.bank_number = bNum2
+                        bcred2.source      = ""platform_routerattack_file""
+                        results.credentials.push(bcred2)
+                    end if
+                end if
+            end for
+        end for
+        results.persons.push(person)
+    end for
+end function
+
+// ── SCAN PHASE ────────────────────────────────────────────────
+netSession = meta.net_use(targetIp)
+if not netSession then
+    results.error = ""Could not connect to router at "" + targetIp
+    writeResults()
+    exit(""node-router: could not connect to router"")
+end if
+
+routerLib = netSession.dump_lib
+if not routerLib then
+    results.error = ""Could not dump router library""
+    writeResults()
+    exit(""node-router: could not dump router library"")
+end if
+
+libName    = routerLib.lib_name
+libVersion = routerLib.version
+
+// Build exploit list from KB first, then scan
+toAttempt = []
+for kb in kbEntries
+    if kb.hasIndex(""lib_name"") and kb.lib_name == libName then
+        if kb.hasIndex(""lib_version"") and kb.lib_version == libVersion then
+            toAttempt.push(kb)
+        end if
+    end if
+end for
+
+if toAttempt.len == 0 then
+    // Scan fresh
+    addresses = meta.scan(routerLib)
+    if addresses != null then
+        for addr in addresses
+            scanText = meta.scan_address(routerLib, addr)
+            if scanText == null then
+                continue
+            end if
+            // Parse exploit names from scan text
+            chunks = scanText.split(""Unsafe check: "")
+            for chunk in chunks
+                if chunk == chunks[0] then
+                    continue
+                end if
+                bStart = chunk.indexOf(""<b>"")
+                bEnd   = chunk.indexOf(""</b>"")
+                if bStart != null and bEnd != null then
+                    vn = chunk[bStart + 3:bEnd]
+                    if vn.len > 0 then
+                        e = {}
+                        e.address      = addr
+                        e.exploit      = vn
+                        e.lib_name     = libName
+                        e.lib_version  = libVersion
+                        toAttempt.push(e)
+                    end if
+                end if
+            end for
+        end for
+    end if
+end if
+
+if toAttempt.len == 0 then
+    results.error = ""No exploits found for "" + libName + "" v"" + libVersion
+    writeResults()
+    exit(""node-router: no exploits found"")
+end if
+
+// ── EXPLOIT PHASE ─────────────────────────────────────────────
+collected = []
+for attempt in toAttempt
+    addr = """"
+    vn   = """"
+    if attempt.hasIndex(""address"") then
+        addr = attempt.address
+    else if attempt.hasIndex(""addr"") then
+        addr = attempt.addr
+    end if
+    if attempt.hasIndex(""exploit"") then
+        vn = attempt.exploit
+    else if attempt.hasIndex(""vn"") then
+        vn = attempt.vn
+    end if
+    if addr.len == 0 or vn.len == 0 then
+        continue
+    end if
+
+    if lanIp.len > 0 then
+        result = routerLib.overflow(addr, vn, lanIp)
+    else
+        result = routerLib.overflow(addr, vn)
+    end if
+
+    if result == null then
+        // Record uncertain in KB
+        kbEntry = {}
+        kbEntry.lib_name    = libName
+        kbEntry.lib_version = libVersion
+        kbEntry.address     = addr
+        kbEntry.exploit     = vn
+        kbEntry.rtype       = ""uncertain""
+        kbEntry.privilege   = """"
+        results.kb_entries.push(kbEntry)
+        continue
+    end if
+
+    rtype = typeof(result)
+    if rtype == ""number"" or (rtype == ""string"" and result.len == 0) then
+        kbEntry2 = {}
+        kbEntry2.lib_name    = libName
+        kbEntry2.lib_version = libVersion
+        kbEntry2.address     = addr
+        kbEntry2.exploit     = vn
+        kbEntry2.rtype       = ""number_result""
+        kbEntry2.privilege   = """"
+        results.kb_entries.push(kbEntry2)
+        continue
+    end if
+
+    // Success
+    kbEntry3 = {}
+    kbEntry3.lib_name    = libName
+    kbEntry3.lib_version = libVersion
+    kbEntry3.address     = addr
+    kbEntry3.exploit     = vn
+    kbEntry3.rtype       = rtype
+    kbEntry3.privilege   = ""guest""
+    results.kb_entries.push(kbEntry3)
+
+    entry = {}
+    entry.addr       = addr
+    entry.vn         = vn
+    entry.result     = result
+    entry.resultType = rtype
+    collected.push(entry)
+end for
+
+if collected.len == 0 then
+    results.error = ""All exploits failed - constraints may not be met""
+    writeResults()
+    exit(""node-router: all exploits failed"")
+end if
+
+// ── HARVEST PHASE ─────────────────────────────────────────────
+// Priority: computer and file results first (mail credentials,
+// usernames from LAN machine), then shell (session adoption).
+shellResult = null
+
+// Pass 1 - computer results (best for mail/passwd/bank)
+for entry in collected
+    if entry.resultType != ""computer"" then
+        continue
+    end if
+    harvestComputer(entry.result)
+    if results.result_type == ""none"" then
+        results.result_type = ""computer""
+    end if
+end for
+
+// Pass 2 - file results (partial filesystem access)
+for entry in collected
+    if entry.resultType != ""file"" then
+        continue
+    end if
+    harvestFile(entry.result)
+    if results.result_type == ""none"" then
+        results.result_type = ""file""
+    end if
+end for
+
+// Pass 3 - shell results (session adoption via flock)
+for entry in collected
+    if entry.resultType != ""shell"" then
+        continue
+    end if
+    if shellResult == null then
+        shellResult = entry.result
+        // Only set shell as primary type if nothing better was harvested
+        if results.result_type == ""none"" then
+            results.result_type = ""shell""
+        end if
+    end if
+end for
+
+// Deploy flock if we got a shell - but try GCO escalation first
+// Router shells come back as guest - need root to deploy flock reliably
+if shellResult != null then
+    currentShell = shellResult
+    currentPriv  = ""guest""
+
+    // Try GCO escalation if creds provided
+    if jobPass.len > 0 then
+        rootUser = ""root""
+        if jobUser.len > 0 then
+            rootUser = jobUser
+        end if
+        cloverShell = tryClover(currentShell, rootUser, jobPass)
+        if cloverShell != null then
+            currentShell = cloverShell
+            currentPriv  = ""root""
+            // Save the cred that worked
+            rcred = {}
+            rcred.type     = ""system""
+            rcred.username = rootUser
+            rcred.password = jobPass
+            rcred.source   = ""platform_routerattack_clover""
+            results.credentials.push(rcred)
+        end if
+    end if
+
+    // Also try creds found during harvest
+    if currentPriv != ""root"" then
+        for cred in results.credentials
+            if currentPriv == ""root"" then
+                break
+            end if
+            if cred.type == ""system"" and cred.username == ""root"" and cred.password.len > 0 then
+                cloverShell2 = tryClover(currentShell, ""root"", cred.password)
+                if cloverShell2 != null then
+                    currentShell = cloverShell2
+                    currentPriv  = ""root""
+                end if
+            end if
+        end for
+    end if
+
+    // Deploy flock from best available shell
+    // Root shell = reliable flock deploy
+    // Guest shell = attempt anyway, may fail on write-restricted routers
+    deployed = deployFlock(currentShell)
+    results.flock_deployed = deployed
+    // Record shell result type - append to existing if computer/file also found
+    if currentPriv == ""root"" then
+        results.result_type = ""shell_root""
+    else if results.result_type == ""none"" then
+        results.result_type = ""shell""
+    end if
+end if
+
+// ── Write results ─────────────────────────────────────────────
+writeResults()
+",1)
+m("/Corvid/tools/rot.src","// ============================================================
+// CORVID | rot
+// Post-exit log corruption loop.
+// Deletes itself and /shiny immediately on launch,
+// then loops corrupting system.log at random intervals.
+// Leaves no trace on disk before the loop even starts.
+// ============================================================
+
+comp = get_shell.host_computer
+
+// ── Self-delete immediately ───────────────────────────────────
+selfBin = comp.File(""/shiny/rot"")
+if selfBin != null then
+    selfBin.delete()
+end if
+
+// ── Clean /shiny directory ────────────────────────────────────
+shinyDir = comp.File(""/shiny"")
+if shinyDir != null then
+    shinyFiles = shinyDir.get_files()
+    if shinyFiles != null then
+        for sf in shinyFiles
+            sf.delete()
+        end for
+    end if
+    shinyFolders = shinyDir.get_folders()
+    if shinyFolders != null then
+        for sdir in shinyFolders
+            subFiles = sdir.get_files()
+            if subFiles != null then
+                for subF in subFiles
+                    subF.delete()
+                end for
+            end if
+            sdir.delete()
+        end for
+    end if
+    shinyDir.delete()
+end if
+
+// ── Log corruption helper ─────────────────────────────────────
+corruptLog = function()
+    logFile = comp.File(""/var/system.log"")
+    if logFile == null then
+        return
+    end if
+    comp.touch(""/var"", ""t"")
+    emptyFile = comp.File(""/var/t"")
+    if emptyFile == null then
+        return
+    end if
+    emptyFile.move(""/var"", ""system.log"")
+end function
+
+// ── Corruption loop ───────────────────────────────────────────
+// Runs indefinitely - persistent log corruption while deployed.
+// Launched via /bin/bash so runs independently of Corvid.
+// Close the session to stop.
+while true
+    corruptLog()
+    wait(15)
+end while
+",1)
+m("/Corvid/asriN/corvid", "import" + char(95) + "code(""/Corvid/asriN/libs/json.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/utils/findWritePerms.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/libs/error.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/libs/functional.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/libs/string.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/libs/ssv.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/mediator.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/facades/file.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/facades/computer.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/facades/shell.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/facades/router.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/facades/metaxploit.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/facades/crypto.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/facades/factory.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/utils/climbFileToRoot.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/utils/getUserFromHandler.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/utils/randomIp.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/utils/genRandomPass.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/command.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/command-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/session/file-session.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/session/computer-session.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/session/shell-session.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/session/session.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/session/session-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/lib-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/metaxploit-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/database/database.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/database/person-db.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/database/org-db.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/database/credential-db.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/database/target-db.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/database/database-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/database/exploit-kb-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/intel-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/data/chainsaw.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/data/pregens.src"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/attack-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/bounce-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/roost-db.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/roost-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/platform-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/sniffer-db.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/shinylibs-db.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/shinylibs-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/macro-manager.txt"")" + char(10), 1)
+m("/Corvid/asriN/corvid", "import" + char(95) + "code(""/Corvid/asriN/managers/config-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/theme-manager.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/managers/corvid-ui.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/commands_1.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/commands_2.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/commands_3.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/commands_4.txt"")" + char(10) + "import" + char(95) + "code(""/Corvid/asriN/commands_5.txt"")" + char(10) + "// ============================================================" + char(10) + "// CORVID | main" + char(10) + "// Entry point. Boots all managers, registers them with the" + char(10) + "// mediator, loads libraries, initialises databases," + char(10) + "// then enters the main command loop." + char(10) + "// ============================================================" + char(10) + "" + char(10) + "" + char(10) + "" + char(10) + "" + char(10) + "" + char(10) + "" + char(10) + "" + char(10) + "" + char(10) + "// chainsaw and pregens are NOT imported into the main binary." + char(10) + "// They live in /Corvid/tools/chainsaw/ and are compiled separately" + char(10) + "// via the 'chainsaw build' command inside Corvid." + char(10) + "" + char(10) + "" + char(10) + "// ============================================================" + char(10) + "// MEDIATOR SETUP" + char(10) + "// ============================================================" + char(10) + "" + char(10) + "mediator = ExtensionMediator.New()" + char(10) + "" + char(10) + "commandManager    = CommandManager.New()" + char(10) + "sessionManager    = SessionManager.New()" + char(10) + "libManager        = LibManager.New()" + char(10) + "metaxManager      = MetaxploitManager.New()" + char(10) + "databaseManager   = DatabaseManager.New()" + char(10) + "intelManager      = IntelManager.New()" + char(10) + "attackManager     = AttackManager.New()" + char(10) + "bounceManager     = BounceManager.New()" + char(10) + "roostManager      = RoostManager.New()" + char(10) + "platformManager   = PlatformManager.New()" + char(10) + "shinyLibsManager  = ShinyLibsManager" + char(10) + "macroManager      = MacroManager.New()" + char(10) + "configManager     = ConfigManager.New()" + char(10) + "themeManager      = ThemeManager.New()" + char(10) + "corvidUi          = CorvidUi.New()" + char(10) + "" + char(10) + "mediator.addExtension(""commandManager"",    commandManager)" + char(10) + "mediator.addExtension(""sessionManager"",    sessionManager)" + char(10) + "mediator.addExtension(""libManager"",        libManager)" + char(10) + "mediator.addExtension(""metaxploitManager"", metaxManager)" + char(10) + "mediator.addExtension(""databaseManager"",   databaseManager)" + char(10) + "mediator.addExtension(""intelManager"",      intelManager)" + char(10) + "mediator.addExtension(""attackManager"",     attackManager)" + char(10) + "mediator.addExtension(""bounceManager"",     bounceManager)" + char(10) + "mediator.addExtension(""roostManager"",      roostManager)" + char(10) + "mediator.addExtension(""platformManager"",   platformManager)" + char(10) + "mediator.addExtension(""shinyLibsManager"",  shinyLibsManager)" + char(10) + "mediator.addExtension(""macroManager"",      macroManager)" + char(10) + "mediator.addExtension(""configManager"",     configManager)" + char(10) + "mediator.addExtension(""themeManager"",      themeManager)" + char(10) + "mediator.addExtension(""corvidUi"",          corvidUi)" + char(10) + "" + char(10) + "// ============================================================" + char(10) + "// REGISTER ALL COMMANDS" + char(10) + "// ============================================================" + char(10) + "" + char(10) + "registerAllCommands(mediator, commandManager)" + char(10) + "" + char(10), 0)
+m("/Corvid/asriN/corvid", "// ============================================================" + char(10) + "// INIT" + char(10) + "// ============================================================" + char(10) + "" + char(10) + "init = function()" + char(10) + "    // 1  -  Add Nest as first session (pivot)" + char(10) + "    nestShell = get_shell" + char(10) + "    session   = sessionManager.addSession(nestShell, ""Nest"")" + char(10) + "    if session isa Error then" + char(10) + "        exit(""CORVID: Could not establish Nest session: "" + session.message)" + char(10) + "    end if" + char(10) + "" + char(10) + "    // 2  -  Load config first (theme depends on it)" + char(10) + "    configResult = configManager.init()" + char(10) + "    if configResult isa Error then" + char(10) + "        print(""[!] Config init failed: "" + configResult.message + ""  -  using defaults"")" + char(10) + "    end if" + char(10) + "" + char(10) + "    // 3  -  Init theme from config" + char(10) + "    themeManager.init()" + char(10) + "" + char(10) + "    // 4  -  Init database (needs pivot session)" + char(10) + "    dbResult = databaseManager.init()" + char(10) + "    if dbResult isa Error then" + char(10) + "        exit(""CORVID: Database init failed: "" + dbResult.message)" + char(10) + "    end if" + char(10) + "" + char(10) + "    // 5  -  Load metaxploit.so from Nest" + char(10) + "    nestHandler = sessionManager.pivotSession.handler" + char(10) + "    metaFile    = nestHandler.getFile(""/lib/metaxploit.so"")" + char(10) + "    if metaFile isa Error then" + char(10) + "        metaFile = nestHandler.getFile(""metaxploit.so"")" + char(10) + "    end if" + char(10) + "    if not (metaFile isa Error) then" + char(10) + "        rawMeta = include_lib(metaFile.path())" + char(10) + "        if rawMeta != null then" + char(10) + "            ipData = {}" + char(10) + "            ipData.ip = sessionManager.pivotSession.data.ip" + char(10) + "            ipData.path = metaFile.path()" + char(10) + "            libManager.addLib(rawMeta, ipData)" + char(10) + "        end if" + char(10) + "    end if" + char(10) + "" + char(10) + "    // 6  -  Load crypto.so from Nest" + char(10) + "    cryptoFile = nestHandler.getFile(""/lib/crypto.so"")" + char(10) + "    if cryptoFile isa Error then" + char(10) + "        cryptoFile = nestHandler.getFile(""crypto.so"")" + char(10) + "    end if" + char(10) + "    if not (cryptoFile isa Error) then" + char(10) + "        rawCrypto = include_lib(cryptoFile.path())" + char(10) + "        if rawCrypto != null then" + char(10) + "            ipData = {}" + char(10) + "            ipData.ip = sessionManager.pivotSession.data.ip" + char(10) + "            ipData.path = cryptoFile.path()" + char(10) + "            libManager.addLib(rawCrypto, ipData)" + char(10) + "        end if" + char(10) + "    end if" + char(10) + "" + char(10) + "    // 7  -  Load saved aliases from config" + char(10) + "    aliases = configManager.get(""aliases"")" + char(10) + "    if not (aliases isa Error) then" + char(10) + "        for kv in aliases" + char(10) + "            commandManager.addAlias(kv.key, kv.value)" + char(10) + "        end for" + char(10) + "    end if" + char(10) + "" + char(10) + "    // 8  -  Display banner and status" + char(10) + "    clear_screen" + char(10) + "    corvidUi.init()" + char(10) + "" + char(10) + "    // 9  -  Init roost manager" + char(10) + "    roostManager.init()" + char(10) + "" + char(10) + "    // 10 -  Init shinylibs manager" + char(10) + "    shinyLibsManager.init(mediator)" + char(10) + "" + char(10) + "    // 10a - Baseline shinylibs scan of Nest libs if DB is empty" + char(10) + "    autoShiny = configManager.get(""autoShiny"")" + char(10) + "    if autoShiny isa Error then" + char(10) + "        autoShiny = ""1""" + char(10) + "        configManager.set(""autoShiny"", ""1"")" + char(10) + "    end if" + char(10) + "" + char(10) + "    // Default apt repo for flock client auto-install of metaxploit" + char(10), 0)
+m("/Corvid/asriN/corvid", "    flockAptRepo = configManager.get(""flockAptRepo"")" + char(10) + "    if flockAptRepo isa Error then" + char(10) + "        configManager.set(""flockAptRepo"", ""30.225.197.154"")" + char(10) + "    end if" + char(10) + "    if autoShiny == ""1"" and shinyLibsManager.db.records.len == 0 then" + char(10) + "        nestHandler = sessionManager.pivotSession.handler" + char(10) + "        nestComp    = nestHandler.shell.shell.host_computer" + char(10) + "        nestLibDir  = nestComp.File(""/lib"")" + char(10) + "        if nestLibDir != null and nestLibDir.is_folder then" + char(10) + "            corvidUi.dim(""Scanning Nest /lib/ for shinylibs baseline..."")" + char(10) + "            libFiles = nestLibDir.get_files" + char(10) + "            if libFiles != null then" + char(10) + "                rawMeta = include_lib(""/lib/metaxploit.so"")" + char(10) + "                if rawMeta != null then" + char(10) + "                    for nestLib in libFiles" + char(10) + "                        if nestLib.name.indexOf("".so"") == null then" + char(10) + "                            continue" + char(10) + "                        end if" + char(10) + "                        metalib = rawMeta.load(nestLib.path)" + char(10) + "                        if metalib == null then" + char(10) + "                            continue" + char(10) + "                        end if" + char(10) + "                        addrs = rawMeta.scan(metalib)" + char(10) + "                        if addrs == null then" + char(10) + "                            addrs = []" + char(10) + "                        end if" + char(10) + "                        exploitTexts = []" + char(10) + "                        for addr in addrs" + char(10) + "                            txt = rawMeta.scan_address(metalib, addr)" + char(10) + "                            if txt != null then" + char(10) + "                                exploitTexts.push(txt)" + char(10) + "                            end if" + char(10) + "                        end for" + char(10) + "                        shinyLibsManager.db.stage(nestLib.name, metalib.version, exploitTexts, nestLib.path)" + char(10) + "                    end for" + char(10) + "                end if" + char(10) + "            end if" + char(10) + "            // Auto-collect all staged Nest libs into DB (no SCP needed - already local)" + char(10) + "            for staged in shinyLibsManager.db.staged" + char(10) + "                shinyLibsManager.db.collect(staged.libName, staged.version, staged.srcPath)" + char(10) + "            end for" + char(10) + "            databaseManager.save()" + char(10) + "            corvidUi.dim(""Shinylibs baseline: "" + str(shinyLibsManager.db.records.len) + "" lib(s) recorded from Nest."")" + char(10) + "        end if" + char(10) + "    end if" + char(10) + "" + char(10) + "    // 11 -  Run init macro if present" + char(10) + "    macroManager.init()" + char(10) + "end function" + char(10) + "" + char(10) + "// ============================================================" + char(10) + "// ENTRY" + char(10) + "// ============================================================" + char(10) + "" + char(10) + "init()" + char(10) + "" + char(10) + "// Show menu on startup" + char(10) + "showMainMenu = true" + char(10) + "" + char(10) + "while true" + char(10) + "    // -- Session health check -----------------------------------------------------" + char(10) + "    currentSess = sessionManager.currentSession" + char(10) + "    if currentSess != null and currentSess != sessionManager.pivotSession then" + char(10) + "        sessHandler = currentSess.handler" + char(10) + "        sessionDead = false" + char(10) + "        if sessHandler isa ShellSession then" + char(10) + "            rawShell = sessHandler.shell.shell" + char(10) + "            if rawShell == null then" + char(10) + "                sessionDead = true" + char(10) + "            else" + char(10), 0)
+m("/Corvid/asriN/corvid", "                testComp = rawShell.host_computer" + char(10) + "                if testComp == null then" + char(10) + "                    sessionDead = true" + char(10) + "                end if" + char(10) + "            end if" + char(10) + "        end if" + char(10) + "        if sessionDead then" + char(10) + "            corvidUi.warning(""Session lost (machine rebooted?) - falling back to previous session"")" + char(10) + "            sessionManager.back()" + char(10) + "            databaseManager.save()" + char(10) + "            showMainMenu = true" + char(10) + "            continue" + char(10) + "        end if" + char(10) + "    end if" + char(10) + "" + char(10) + "    // -- Show menu if flagged ------------------------------------------------------" + char(10) + "    if showMainMenu then" + char(10) + "        corvidUi.showMenu()" + char(10) + "        showMainMenu = false" + char(10) + "    end if" + char(10) + "" + char(10) + "    // -- Prompt and input ---------------------------------------------------------" + char(10) + "    session = sessionManager.currentSession" + char(10) + "    prompt  = corvidUi.prompt(session)" + char(10) + "    answer  = user_input(prompt)" + char(10) + "    trimmed = answer.trim" + char(10) + "    if trimmed.len == 0 then" + char(10) + "        continue" + char(10) + "    end if" + char(10) + "" + char(10) + "    // -- menu / 0 -> show main menu -----------------------------------------------" + char(10) + "    if trimmed == ""menu"" or trimmed == ""0"" then" + char(10) + "        showMainMenu = true" + char(10) + "        continue" + char(10) + "    end if" + char(10) + "" + char(10) + "    // -- Check if numeric menu selection ------------------------------------------" + char(10) + "    isNumeric = trimmed.len > 0" + char(10) + "    for ch in trimmed" + char(10) + "        if ""0123456789"".indexOf(ch) == null then" + char(10) + "            isNumeric = false" + char(10) + "        end if" + char(10) + "    end for" + char(10) + "" + char(10) + "    if isNumeric then" + char(10) + "        n = trimmed.val" + char(10) + "        corvidUi.lastMenuOption = n" + char(10) + "" + char(10) + "        if n == 1 then" + char(10) + "            // Attack - offer guided or port-specific" + char(10) + "            print(""--------------------------------------------"")" + char(10) + "            print(""  ATTACK MODE"")" + char(10) + "            print(""--------------------------------------------"")" + char(10) + "            print(""  1.  Guided     full recon and exploit workflow"")" + char(10) + "            print(""  2.  Port       attack a single specific port/service"")" + char(10) + "            print(""  3.  Router     exploit router to extract mail credentials"")" + char(10) + "            print("""")" + char(10) + "            attackMode = user_input(""  Mode (1/2/3): "").trim" + char(10) + "            if attackMode != ""1"" and attackMode != ""2"" and attackMode != ""3"" then" + char(10) + "                print(""[!] Invalid mode - enter 1, 2, or 3"")" + char(10) + "                continue" + char(10) + "            end if" + char(10) + "            if attackMode == ""2"" then" + char(10) + "                paIp   = user_input(""  Target IP: "").trim" + char(10) + "                paPort = user_input(""  Port: "").trim" + char(10) + "                paLan  = user_input(""  LAN IP (enter to skip): "").trim" + char(10) + "                if paIp.len > 0 and paPort.len > 0 then" + char(10) + "                    if paLan.len > 0 then" + char(10) + "                        commandManager.execute(""portattack "" + paIp + "" "" + paPort + "" "" + paLan)" + char(10) + "                    else" + char(10) + "                        commandManager.execute(""portattack "" + paIp + "" "" + paPort)" + char(10) + "                    end if" + char(10) + "                    commandManager.run()" + char(10) + "                end if" + char(10), 0)
+m("/Corvid/asriN/corvid", "            else if attackMode == ""3"" then" + char(10) + "                rIp  = user_input(""  Router public IP: "").trim" + char(10) + "                rLan = user_input(""  LAN target IP (enter to skip): "").trim" + char(10) + "                if rIp.len == 0 then" + char(10) + "                    continue" + char(10) + "                end if" + char(10) + "                if rIp.indexOf(""192.168."") == 0 or rIp.indexOf(""10."") == 0 or rIp.indexOf(""172.16."") == 0 or rIp.indexOf(""172.17."") == 0 then" + char(10) + "                    print(""[!] Warning: "" + rIp + "" looks like a LAN IP - enter the PUBLIC IP"")" + char(10) + "                    warnAnswer = user_input(""  Continue anyway? (yes/no): "").trim" + char(10) + "                    if warnAnswer != ""yes"" and warnAnswer != ""y"" then" + char(10) + "                        continue" + char(10) + "                    end if" + char(10) + "                end if" + char(10) + "                if rLan.len > 0 then" + char(10) + "                    commandManager.execute(""routerattack "" + rIp + "" "" + rLan)" + char(10) + "                else" + char(10) + "                    commandManager.execute(""routerattack "" + rIp)" + char(10) + "                end if" + char(10) + "                commandManager.run()" + char(10) + "            else" + char(10) + "                publicIp = user_input(""  Public IP: "").trim" + char(10) + "                if publicIp.len == 0 then" + char(10) + "                    continue" + char(10) + "                end if" + char(10) + "                if publicIp.indexOf(""192.168."") == 0 or publicIp.indexOf(""10."") == 0 or publicIp.indexOf(""172.16."") == 0 or publicIp.indexOf(""172.17."") == 0 then" + char(10) + "                    print(""[!] Warning: "" + publicIp + "" looks like a LAN IP - enter the PUBLIC IP, not the LAN IP"")" + char(10) + "                    warnAnswer = user_input(""  Continue anyway? (yes/no): "").trim" + char(10) + "                    if warnAnswer != ""yes"" and warnAnswer != ""y"" then" + char(10) + "                        continue" + char(10) + "                    end if" + char(10) + "                end if" + char(10) + "                lanIp = user_input(""  LAN target IP (enter to skip): "").trim" + char(10) + "                if lanIp.len > 0 then" + char(10) + "                    commandManager.execute(""attack "" + publicIp + "" "" + lanIp)" + char(10) + "                else" + char(10) + "                    commandManager.execute(""attack "" + publicIp)" + char(10) + "                end if" + char(10) + "                commandManager.run()" + char(10) + "            end if" + char(10) + "" + char(10) + "        else if n == 2 then" + char(10) + "            // Sessions" + char(10) + "            commandManager.execute(""sessions"")" + char(10) + "            commandManager.run()" + char(10) + "            sessionId = user_input(""  Switch to session (enter to skip): "")" + char(10) + "            sessionId = sessionId.trim" + char(10) + "            if sessionId.len > 0 then" + char(10) + "                commandManager.execute(""use "" + sessionId)" + char(10) + "                commandManager.run()" + char(10) + "            end if" + char(10) + "" + char(10) + "        else if n == 3 then" + char(10) + "            // Database sub-menu" + char(10) + "            dbDone = false" + char(10) + "            while not dbDone" + char(10) + "                corvidUi.showDatabaseMenu()" + char(10) + "                dbAnswer = user_input(corvidUi.mediator.getExtension(""themeManager"").highlight(""  > ""))" + char(10) + "                dbAnswer = dbAnswer.trim" + char(10) + "                if dbAnswer == ""1"" then" + char(10) + "                    term = user_input(""  Search term (enter for all): "")" + char(10) + "                    term = term.trim" + char(10) + "                    if term.len > 0 then" + char(10), 0)
+m("/Corvid/asriN/corvid", "                        commandManager.execute(""persons "" + term)" + char(10) + "                    else" + char(10) + "                        commandManager.execute(""persons"")" + char(10) + "                    end if" + char(10) + "                    commandManager.run()" + char(10) + "                else if dbAnswer == ""2"" then" + char(10) + "                    term = user_input(""  Search term (enter for all): "")" + char(10) + "                    term = term.trim" + char(10) + "                    if term.len > 0 then" + char(10) + "                        commandManager.execute(""orgs "" + term)" + char(10) + "                    else" + char(10) + "                        commandManager.execute(""orgs"")" + char(10) + "                    end if" + char(10) + "                    commandManager.run()" + char(10) + "                else if dbAnswer == ""3"" then" + char(10) + "                    term = user_input(""  Search term (enter for all): "")" + char(10) + "                    term = term.trim" + char(10) + "                    if term.len > 0 then" + char(10) + "                        commandManager.execute(""creds "" + term)" + char(10) + "                    else" + char(10) + "                        commandManager.execute(""creds"")" + char(10) + "                    end if" + char(10) + "                    commandManager.run()" + char(10) + "                else if dbAnswer == ""4"" then" + char(10) + "                    term = user_input(""  Search term (enter for all): "")" + char(10) + "                    term = term.trim" + char(10) + "                    if term.len > 0 then" + char(10) + "                        commandManager.execute(""targets "" + term)" + char(10) + "                    else" + char(10) + "                        commandManager.execute(""targets"")" + char(10) + "                    end if" + char(10) + "                    commandManager.run()" + char(10) + "                else if dbAnswer == ""5"" then" + char(10) + "                    commandManager.execute(""dbstats"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if dbAnswer == ""6"" then" + char(10) + "                    commandManager.execute(""dbsave"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if dbAnswer == ""7"" then" + char(10) + "                    commandManager.execute(""dbsync push"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if dbAnswer == ""8"" then" + char(10) + "                    commandManager.execute(""dbsync pull"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if dbAnswer == ""9"" then" + char(10) + "                    commandManager.execute(""dbmerge"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if dbAnswer == ""0"" then" + char(10) + "                    dbDone = true" + char(10) + "                end if" + char(10) + "            end while" + char(10) + "" + char(10) + "        else if n == 4 then" + char(10) + "            // Bounce sub-menu" + char(10) + "            bounceDone = false" + char(10) + "            while not bounceDone" + char(10) + "                corvidUi.showBounceMenu()" + char(10) + "                bAnswer = user_input(corvidUi.mediator.getExtension(""themeManager"").highlight(""  > ""))" + char(10) + "                bAnswer = bAnswer.trim" + char(10) + "                if bAnswer == ""1"" then" + char(10) + "                    commandManager.execute(""bounces map"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if bAnswer == ""2"" then" + char(10) + "                    commandManager.execute(""bounces update"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if bAnswer == ""3"" then" + char(10), 0)
+m("/Corvid/asriN/corvid", "                    commandManager.execute(""bounces verify"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if bAnswer == ""4"" then" + char(10) + "                    hopInput = user_input(""  Hops (enter for 5, or 'max'): "").trim" + char(10) + "                    if hopInput.len == 0 then" + char(10) + "                        commandManager.execute(""bounces chain"")" + char(10) + "                    else" + char(10) + "                        commandManager.execute(""bounces chain "" + hopInput)" + char(10) + "                    end if" + char(10) + "                    commandManager.run()" + char(10) + "                else if bAnswer == ""5"" then" + char(10) + "                    commandManager.execute(""bounces harden"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if bAnswer == ""6"" then" + char(10) + "                    commandManager.execute(""bounces wipe"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if bAnswer == ""7"" then" + char(10) + "                    removeIpInput = user_input(""  IP to remove: "")" + char(10) + "                    if removeIpInput.trim.len > 0 then" + char(10) + "                        commandManager.execute(""bounces remove "" + removeIpInput.trim)" + char(10) + "                        commandManager.run()" + char(10) + "                    end if" + char(10) + "                else if bAnswer == ""8"" then" + char(10) + "                    commandManager.execute(""bounces add"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if bAnswer == ""9"" then" + char(10) + "                    resetIpInput = user_input(""  IP to reset: "")" + char(10) + "                    if resetIpInput.trim.len > 0 then" + char(10) + "                        commandManager.execute(""bounces reset "" + resetIpInput.trim)" + char(10) + "                        commandManager.run()" + char(10) + "                    end if" + char(10) + "                else if bAnswer == ""10"" or bAnswer == ""s"" then" + char(10) + "                    commandManager.execute(""bounces revive"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if bAnswer == ""11"" then" + char(10) + "                    commandManager.execute(""bounces restore"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if bAnswer == ""0"" then" + char(10) + "                    bounceDone = true" + char(10) + "                end if" + char(10) + "            end while" + char(10) + "" + char(10) + "        else if n == 5 then" + char(10) + "            // Intel sub-menu" + char(10) + "            intelDone = false" + char(10) + "            while not intelDone" + char(10) + "                corvidUi.showIntelMenu()" + char(10) + "                iAnswer = user_input(corvidUi.mediator.getExtension(""themeManager"").highlight(""  > ""))" + char(10) + "                iAnswer = iAnswer.trim" + char(10) + "                if iAnswer == ""1"" then" + char(10) + "                    pubIp = user_input(""  Public IP of current session: "")" + char(10) + "                    pubIp = pubIp.trim" + char(10) + "                    lanIp = user_input(""  LAN IP (enter to skip): "")" + char(10) + "                    lanIp = lanIp.trim" + char(10) + "                    if lanIp.len > 0 then" + char(10) + "                        commandManager.execute(""harvest "" + pubIp + "" "" + lanIp)" + char(10) + "                    else" + char(10) + "                        commandManager.execute(""harvest "" + pubIp)" + char(10) + "                    end if" + char(10) + "                    commandManager.run()" + char(10) + "                else if iAnswer == ""2"" then" + char(10) + "                    ip = user_input(""  IP to whois: "")" + char(10), 0)
+m("/Corvid/asriN/corvid", "                    ip = ip.trim" + char(10) + "                    if ip.len > 0 then" + char(10) + "                        commandManager.execute(""whois "" + ip)" + char(10) + "                        commandManager.run()" + char(10) + "                    end if" + char(10) + "                else if iAnswer == ""3"" then" + char(10) + "                    commandManager.execute(""getpass"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if iAnswer == ""4"" then" + char(10) + "                    commandManager.execute(""scanlan"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if iAnswer == ""5"" then" + char(10) + "                    smtpIp = user_input(""  IP to grab SMTP users (enter for current session): "").trim" + char(10) + "                    if smtpIp.len > 0 then" + char(10) + "                        commandManager.execute(""smtpgrab "" + smtpIp)" + char(10) + "                    else" + char(10) + "                        commandManager.execute(""smtpgrab"")" + char(10) + "                    end if" + char(10) + "                    commandManager.run()" + char(10) + "                else if iAnswer == ""6"" then" + char(10) + "                    // Sniffer sub-menu" + char(10) + "                    snifferDone = false" + char(10) + "                    while not snifferDone" + char(10) + "                        corvidUi.showSnifferMenu()" + char(10) + "                        sAnswer = user_input(corvidUi.mediator.getExtension(""themeManager"").highlight(""  > ""))" + char(10) + "                        sAnswer = sAnswer.trim" + char(10) + "                        if sAnswer == ""1"" then" + char(10) + "                            commandManager.execute(""sniffer deploy"")" + char(10) + "                            commandManager.run()" + char(10) + "                        else if sAnswer == ""2"" then" + char(10) + "                            commandManager.execute(""sniffer collect"")" + char(10) + "                            commandManager.run()" + char(10) + "                        else if sAnswer == ""3"" then" + char(10) + "                            commandManager.execute(""sniffer collect roosts"")" + char(10) + "                            commandManager.run()" + char(10) + "                        else if sAnswer == ""4"" then" + char(10) + "                            commandManager.execute(""sniffer list"")" + char(10) + "                            commandManager.run()" + char(10) + "                        else if sAnswer == ""5"" then" + char(10) + "                            commandManager.execute(""sniffer promote"")" + char(10) + "                            commandManager.run()" + char(10) + "                        else if sAnswer == ""6"" then" + char(10) + "                            commandManager.execute(""sniffer clean"")" + char(10) + "                            commandManager.run()" + char(10) + "                        else if sAnswer == ""0"" then" + char(10) + "                            snifferDone = true" + char(10) + "                        end if" + char(10) + "                    end while" + char(10) + "                else if iAnswer == ""0"" then" + char(10) + "                    intelDone = true" + char(10) + "                end if" + char(10) + "            end while" + char(10) + "" + char(10) + "        else if n == 6 then" + char(10) + "            // Flock sub-menu" + char(10) + "            flockDone = false" + char(10) + "            while not flockDone" + char(10) + "                corvidUi.showFlockMenu()" + char(10) + "                rAnswer = user_input(corvidUi.mediator.getExtension(""themeManager"").highlight(""  > ""))" + char(10) + "                rAnswer = rAnswer.trim" + char(10) + "                if rAnswer == ""1"" then" + char(10) + "                    commandManager.execute(""flock build"")" + char(10), 0)
+m("/Corvid/asriN/corvid", "                    commandManager.run()" + char(10) + "                else if rAnswer == ""2"" then" + char(10) + "                    commandManager.execute(""flock status"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if rAnswer == ""3"" then" + char(10) + "                    commandManager.execute(""flock deploy"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if rAnswer == ""4"" then" + char(10) + "                    commandManager.execute(""flock list"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if rAnswer == ""5"" then" + char(10) + "                    flockIdx = user_input(""  Connection index (enter to pick from list): "").trim" + char(10) + "                    if flockIdx.len > 0 then" + char(10) + "                        commandManager.execute(""flock adopt "" + flockIdx)" + char(10) + "                    else" + char(10) + "                        commandManager.execute(""flock adopt"")" + char(10) + "                    end if" + char(10) + "                    commandManager.run()" + char(10) + "                else if rAnswer == ""0"" then" + char(10) + "                    flockDone = true" + char(10) + "                end if" + char(10) + "            end while" + char(10) + "" + char(10) + "        else if n == 7 then" + char(10) + "            // Roost sub-menu" + char(10) + "            roostDone = false" + char(10) + "            while not roostDone" + char(10) + "                corvidUi.showRoostMenu()" + char(10) + "                csAnswer = user_input(corvidUi.mediator.getExtension(""themeManager"").highlight(""  > ""))" + char(10) + "                csAnswer = csAnswer.trim" + char(10) + "                if csAnswer == ""1"" then" + char(10) + "                    commandManager.execute(""roost convert"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if csAnswer == ""2"" then" + char(10) + "                    commandManager.execute(""roost list"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if csAnswer == ""3"" then" + char(10) + "                    commandManager.execute(""roost pick"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if csAnswer == ""4"" then" + char(10) + "                    commandManager.execute(""roost verify"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if csAnswer == ""5"" then" + char(10) + "                    commandManager.execute(""roost nuke"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if csAnswer == ""6"" then" + char(10) + "                    commandManager.execute(""roost sweep"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if csAnswer == ""7"" then" + char(10) + "                    commandManager.execute(""roost clean"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if csAnswer == ""0"" then" + char(10) + "                    roostDone = true" + char(10) + "                end if" + char(10) + "            end while" + char(10) + "" + char(10) + "        else if n == 8 then" + char(10) + "            // Platform sub-menu" + char(10) + "            platformDone = false" + char(10) + "            while not platformDone" + char(10) + "                corvidUi.showPlatformMenu()" + char(10) + "                pAnswer = user_input(corvidUi.mediator.getExtension(""themeManager"").highlight(""  > ""))" + char(10) + "                pAnswer = pAnswer.trim" + char(10) + "                if pAnswer == ""1"" then" + char(10) + "                    commandManager.execute(""platform build"")" + char(10) + "                    commandManager.run()" + char(10), 0)
+m("/Corvid/asriN/corvid", "                else if pAnswer == ""2"" then" + char(10) + "                    pTargetIp = user_input(""  Target public IP: "").trim" + char(10) + "                    pLanIp    = user_input(""  Target LAN IP (enter to skip): "").trim" + char(10) + "                    if pTargetIp.len > 0 then" + char(10) + "                        if pLanIp.len > 0 then" + char(10) + "                            commandManager.execute(""platform deploy "" + pTargetIp + "" "" + pLanIp)" + char(10) + "                        else" + char(10) + "                            commandManager.execute(""platform deploy "" + pTargetIp)" + char(10) + "                        end if" + char(10) + "                        commandManager.run()" + char(10) + "                    end if" + char(10) + "                else if pAnswer == ""3"" then" + char(10) + "                    commandManager.execute(""platform run"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if pAnswer == ""4"" then" + char(10) + "                    commandManager.execute(""platform collect"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if pAnswer == ""5"" then" + char(10) + "                    commandManager.execute(""platform clean"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if pAnswer == ""6"" then" + char(10) + "                    commandManager.execute(""platform sniffer"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if pAnswer == ""7"" then" + char(10) + "                    commandManager.execute(""platform collect sniffer"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if pAnswer == ""0"" then" + char(10) + "                    platformDone = true" + char(10) + "                end if" + char(10) + "            end while" + char(10) + "" + char(10) + "        else if n == 9 then" + char(10) + "            // Macros" + char(10) + "            commandManager.execute(""macro list"")" + char(10) + "            commandManager.run()" + char(10) + "            macroName = user_input(""  Run macro (enter to skip): "")" + char(10) + "            macroName = macroName.trim" + char(10) + "            if macroName.len > 0 then" + char(10) + "                commandManager.execute(""macro run "" + macroName)" + char(10) + "                commandManager.run()" + char(10) + "            end if" + char(10) + "" + char(10) + "        else if n == 10 then" + char(10) + "            // Settings menu" + char(10) + "            settingsDone = false" + char(10) + "            while not settingsDone" + char(10) + "                corvidUi.showSettingsMenu(configManager)" + char(10) + "                sAnswer = user_input(corvidUi.mediator.getExtension(""themeManager"").highlight(""  > ""))" + char(10) + "                sAnswer = sAnswer.trim" + char(10) + "" + char(10) + "                if sAnswer == ""0"" then" + char(10) + "                    settingsDone = true" + char(10) + "                else if sAnswer == ""1"" then" + char(10) + "                    cur = configManager.get(""autoShiny"")" + char(10) + "                    if cur isa Error or cur == ""1"" then" + char(10) + "                        configManager.set(""autoShiny"", ""0"")" + char(10) + "                        corvidUi.warning(""autoShiny OFF — lib scoring disabled"")" + char(10) + "                    else" + char(10) + "                        configManager.set(""autoShiny"", ""1"")" + char(10) + "                        corvidUi.success(""autoShiny ON"")" + char(10) + "                    end if" + char(10) + "                else if sAnswer == ""2"" then" + char(10) + "                    cur = configManager.get(""autoWhois"")" + char(10) + "                    if cur isa Error or cur == ""1"" then" + char(10), 0)
+m("/Corvid/asriN/corvid", "                        configManager.set(""autoWhois"", ""0"")" + char(10) + "                        corvidUi.warning(""autoWhois OFF — whois skipped during attack"")" + char(10) + "                    else" + char(10) + "                        configManager.set(""autoWhois"", ""1"")" + char(10) + "                        corvidUi.success(""autoWhois ON"")" + char(10) + "                    end if" + char(10) + "                else if sAnswer == ""3"" then" + char(10) + "                    cur = configManager.get(""autoSmtp"")" + char(10) + "                    if cur isa Error or cur == ""1"" then" + char(10) + "                        configManager.set(""autoSmtp"", ""0"")" + char(10) + "                        corvidUi.warning(""autoSmtp OFF — SMTP enumeration skipped"")" + char(10) + "                    else" + char(10) + "                        configManager.set(""autoSmtp"", ""1"")" + char(10) + "                        corvidUi.success(""autoSmtp ON"")" + char(10) + "                    end if" + char(10) + "                else if sAnswer == ""4"" then" + char(10) + "                    cur = configManager.get(""autoOwn"")" + char(10) + "                    if cur isa Error or cur == ""1"" then" + char(10) + "                        configManager.set(""autoOwn"", ""0"")" + char(10) + "                        corvidUi.warning(""autoOwn OFF — no owned prompt at end of attack"")" + char(10) + "                    else" + char(10) + "                        configManager.set(""autoOwn"", ""1"")" + char(10) + "                        corvidUi.success(""autoOwn ON"")" + char(10) + "                    end if" + char(10) + "                else if sAnswer == ""5"" then" + char(10) + "                    cur = configManager.get(""kbFallback"")" + char(10) + "                    if cur isa Error or cur == ""1"" then" + char(10) + "                        configManager.set(""kbFallback"", ""0"")" + char(10) + "                        corvidUi.warning(""kbFallback OFF — only KB-known exploits will be tried"")" + char(10) + "                    else" + char(10) + "                        configManager.set(""kbFallback"", ""1"")" + char(10) + "                        corvidUi.success(""kbFallback ON — full scan runs when no KB hits"")" + char(10) + "                    end if" + char(10) + "                else if sAnswer == ""6"" then" + char(10) + "                    corvidUi.separator()" + char(10) + "                    corvidUi.highlight(""ALIASES"")" + char(10) + "                    corvidUi.separator()" + char(10) + "                    commandManager.execute(""aliases"")" + char(10) + "                    commandManager.run()" + char(10) + "                else if sAnswer == ""7"" then" + char(10) + "                    corvidUi.info(""Usage: theme <slot> <hex>"")" + char(10) + "                    corvidUi.info(""Slots: highlight  text  secondary  success  warning  info  danger  error"")" + char(10) + "                    commandManager.run()" + char(10) + "                end if" + char(10) + "            end while" + char(10) + "" + char(10) + "        end if" + char(10) + "" + char(10) + "        // After any menu action, return to main menu" + char(10) + "        showMainMenu = true" + char(10) + "" + char(10) + "    else" + char(10) + "        // -- Direct command --------------------------------------------------------" + char(10) + "        commandManager.execute(answer)" + char(10) + "        commandManager.run()" + char(10) + "" + char(10) + "        // Post-command session check" + char(10) + "        currentSess2 = sessionManager.currentSession" + char(10) + "        if currentSess2 != null and currentSess2 != sessionManager.pivotSession then" + char(10) + "            sessPriv = currentSess2.handler.privilege()" + char(10) + "            if sessPriv == null or sessPriv == """" then" + char(10) + "                corvidUi.warning(""Session connection lost - falling back to previous session"")", 0)
+m("/Corvid/asriN/corvid", char(10) + "                sessionManager.back()" + char(10) + "                databaseManager.save()" + char(10) + "            end if" + char(10) + "        end if" + char(10) + "" + char(10) + "    end if" + char(10) + "end while" + char(10) + "" + char(10), 0)
+m("/Corvid/tools/cnmap.src","// cnmap.src — Corvid LAN scanner
+// Deployed to target by lannmap. Uses get_router() in target's LAN context.
+// Writes results to /root/cnmap_out.txt in Corvid's expected format.
+
+outPath = ""/root/cnmap_out.txt""
+output = """"
+
+router = get_router()
+if router != null then
+    ips = router.devices_lan_ip
+    if ips == null then
+        ips = []
+    end if
+    for ip in ips
+        output = output + ""DEVICE "" + ip + char(10)
+        ports = router.device_ports(ip)
+        if ports != null then
+            for port in ports
+                info = router.port_info(port)
+                parts = []
+                if info != null then
+                    parts = info.split("" "")
+                end if
+                svcName = ""unknown""
+                svcVer  = ""0""
+                fwd = ""0""
+                opn = ""0""
+                if parts.len >= 1 then
+                    svcName = parts[0]
+                end if
+                if parts.len >= 2 then
+                    svcVer = parts[1]
+                end if
+                if parts.len >= 3 then
+                    fwd = parts[2]
+                end if
+                if parts.len >= 4 then
+                    opn = parts[3]
+                end if
+                output = output + ""PORT "" + str(port) + "" "" + svcName + "" "" + svcVer + "" "" + fwd + "" "" + opn + char(10)
+            end for
+        end if
+    end for
+end if
+
+output = output + ""DONE""
+
+comp = get_shell.host_computer
+outDir = ""/root""
+comp.touch(outDir, ""cnmap_out.txt"")
+outFile = comp.File(outPath)
+if outFile != null then
+    outFile.set_content(output)
+end if
+",1)

@@ -1,0 +1,68 @@
+// ============================================================
+// CORVID 2.0 | facades/shell
+// Wraps the game Shell object.
+// ============================================================
+
+Shell = {}
+Shell.shell = null
+
+Shell.getComputer = function()
+    result = self.shell.host_computer
+    if result == null then
+        return Error.New("No computer associated with this shell", "NO_COMPUTER")
+    end if
+    return Computer.New(result)
+end function
+
+Shell.connectTo = function(ip, port, user, pass, service)
+    if service == null then
+        service = "ssh"
+    end if
+    result = self.shell.connect_service(ip, port, user, pass, service)
+    if typeof(result) == "string" then
+        return Error.New(result, "CONNECT_ERROR")
+    end if
+    return Shell.New(result)
+end function
+
+Shell.transferFile = function(srcPath, destPath, otherShell)
+    result = self.shell.scp(srcPath, destPath, otherShell.shell)
+    if typeof(result) == "string" then
+        return Error.New(result, "SCP_ERROR")
+    end if
+    return result
+end function
+
+Shell.launch = function(path, args)
+    if args == null then
+        args = ""
+    end if
+    result = self.shell.launch(path, args)
+    if result == false then
+        return Error.New("Failed to launch: " + path, "LAUNCH_ERROR")
+    end if
+end function
+
+Shell.build = function(srcPath, destPath)
+    result = self.shell.build(srcPath, destPath)
+    if typeof(result) == "string" and result.len > 0 then
+        return Error.New(result, "BUILD_ERROR")
+    end if
+end function
+
+Shell.activate = function()
+    self.shell.start_terminal()
+end function
+
+Shell.masterKey = function(ip, port, user)
+    return self.shell.masterkey(ip, port, user)
+end function
+
+Shell.New = function(shell)
+    if typeof(shell) != "shell" then
+        return Error.New("Cannot create Shell from non-shell object", "TYPE_ERROR")
+    end if
+    result = new Shell
+    result.shell = shell
+    return result
+end function

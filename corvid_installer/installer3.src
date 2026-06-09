@@ -1715,6 +1715,25 @@ _cmd.callback = function(params, mediator)
         kbLibVersion = routerLib.version
         ui.success(""Router library: "" + kbLibName + "" v"" + kbLibVersion)
 
+        // Score router lib and stage if shiny
+        rAddrs3 = meta.scan(routerLib)
+        if rAddrs3 == null then
+            rAddrs3 = []
+        end if
+        rTexts3 = []
+        for rAddr3 in rAddrs3
+            rTxt3 = meta.scan_address(routerLib, rAddr3)
+            if rTxt3 != null then
+                rTexts3.push(rTxt3)
+            end if
+        end for
+        shinyMgr3r = mediator.getExtension(""shinyLibsManager"")
+        rStaged3 = shinyMgr3r.db.stage(kbLibName, kbLibVersion, rTexts3, ""/lib/"" + kbLibName)
+        if rStaged3 != null then
+            ui.dim(""Router lib scored: "" + kbLibName + "" v"" + kbLibVersion + "" ["" + rStaged3 + ""]"")
+            ui.warning(""To collect this lib you need a shell on the router — adopt a shell result then run shinylibs get"")
+        end if
+
         // ── Build exploit list from KB or full scan ───────────────────────
         toAttempt = []
         kbRecords = dbManager2.kbLookup(kbLibName, kbLibVersion)

@@ -1,0 +1,2589 @@
+// ============================================================
+// CORVID 2.0 | commands_5
+// Roost and platform commands.
+// roost: build, deploy, convert, list, pick, verify, nuke
+// platform: deploy, run, collect, clean
+// ============================================================
+
+// ── roost ──────────────────────────────────────────────────────────────
+_cmd = new Command
+_cmd.name = "roost"
+_cmd.description = "Roost node management. Subcommands: build deploy convert list pick verify nuke sweep clean"
+_cmd.parameters = [OptionsParameter.New({"name": "subcommand", "required": true, "options": {"convert": "convert", "list": "list", "pick": "pick", "adopt": "adopt", "verify": "verify", "nuke": "nuke", "sweep": "sweep", "clean": "clean"}}), StringParameter.New({"name": "arg", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+    configManager  = mediator.getExtension("configManager")
+    bounceManager  = mediator.getExtension("bounceManager")
+    sub            = params.subcommand
+
+    // ── build ────────────────────────────────────────────────────────────
+
+    // ── deploy ───────────────────────────────────────────────────────────
+    if sub == "convert" then
+        ui.separator()
+        ui.highlight("CONVERTING FLOCK TO ROOST NODE")
+        ui.separator()
+
+        // List current flock connections
+        meta = include_lib("/lib/metaxploit.so")
+        if meta == null then
+            return Error.New("metaxploit.so not available", "NO_META")
+        end if
+
+        shells = meta.rshell_server()
+        if shells == null or shells.len == 0 then
+            return Error.New("No active flock connections - run flock adopt first", "NO_RSHELL")
+        end if
+
+        // Show available flock connections
+        for i in range(0, shells.len - 1)
+            sh = shells[i]
+            shIp = "unknown"
+            if typeof(sh) == "shell" then
+                comp = sh.host_computer
+                if comp != null then
+                    shIp = comp.public_ip + " / " + comp.local_ip
+                end if
+            end if
+            ui.info("  [" + str(i) + "]  " + shIp)
+        end for
+
+        ui.print("")
+        idxStr = user_input("  Convert which connection (0-" + str(shells.len - 1) + ", enter to cancel): ").trim
+        if idxStr.len == 0 then
+            return
+        end if
+        idx = idxStr.val
+        if not shells.hasIndex(idx) then
+            return Error.New("Invalid index", "INVALID_IDX")
+        end if
+
+        sh = shells[idx]
+        if typeof(sh) != "shell" then
+            return Error.New("Invalid shell object at index " + str(idx), "INVALID_SHELL")
+        end if
+
+        comp = sh.host_computer
+        publicIp = comp.public_ip
+        lanIp = comp.local_ip
+
+        // Check we have root SSH credentials for this machine
+        rootPass = ""
+        creds = dbManager.findCredentialsByIp(publicIp)
+        for cred in creds
+            if cred.username == "root" and cred.type == "system" and cred.password.len > 0 then
+                rootPass = cred.password
+            end if
+        end for
+
+        if rootPass.len == 0 then
+            ui.warning("No root credentials found for " + publicIp + " in DB")
+            ui.info("Run harvest on this machine first to save root password")
+            manualPass = user_input("  Enter root password manually (enter to cancel): ").trim
+            if manualPass.len == 0 then
+                return
+            end if
+            rootPass = manualPass
+            // Save it
+            credData = {}
+            credData.type = "system" ; credData.username = "root"
+            credData.password = rootPass ; credData.public_ip = publicIp
+            credData.lan_ip = lanIp ; credData.source = "manual"
+            dbManager.upsertCredential(credData)
+        end if
+
+        // Verify SSH actually works with these creds
+        ui.info("Verifying SSH access to " + publicIp + "...")
+        pivotShell = sessionManager.pivotSession.handler.shell.shell
+        sshTest = pivotShell.connect_service(publicIp, 22, "root", rootPass, "ssh")
+        if typeof(sshTest) != "shell" then
+            ui.warning("SSH verification failed - roost requires SSH root access")
+            ui.info("Check port 22 is forwarded and root password is correct")
+            proceed = user_input("  Register anyway without SSH verification? (yes/no): ").trim
+            if proceed != "yes" and proceed != "y" then
+                return
+            end if
+        else
+            ui.success("SSH root access confirmed ✓")
+        end if
+
+        // Register in roost DB
+        procName = RoostManager.randomProcessName()
+        dbManager.roostDb.add(publicIp, lanIp, procName)
+
+        // Remove from bounce pool if present
+        bounceManager.removeBounce(publicIp)
+
+        // Adopt as current session
+        newSession = sessionManager.addSession(sh, "roost@" + publicIp)
+        if newSession isa Error then
+            return newSession
+        end if
+        sessionManager.setCurrentSession(newSession)
+
+        dbManager.save()
+        ui.success("Roost node registered: " + publicIp)
+        ui.info("Process name: " + procName)
+        ui.info("Now on: " + sessionManager.currentSession.label)
+        ui.info("Run: leave  when done")
+        ui.separator()
+
+    // ── list ─────────────────────────────────────────────────────────────
+    else if sub == "list" then
+        ui.separator()
+        ui.highlight("ROOST NODE POOL")
+        ui.separator()
+
+        nodes = dbManager.roostDb.records
+        if nodes.len == 0 then
+            ui.warning("No roost nodes registered.")
+            ui.info("Run: flock deploy  from a bounce session to add nodes")
+            ui.separator()
+            return
+        end if
+
+        for node in nodes
+            statusColor = "<color=#00ff00>"
+            if node.status == ROOST_STATUS.DEAD then
+                statusColor = "<color=#FF4444>"
+            else if node.status == ROOST_STATUS.DORMANT then
+                statusColor = "<color=#FFFC33>"
+            end if
+            lastUsed = "never"
+            if node.last_used > 0 then
+                lastUsed = str(floor((time - node.last_used) / 60)) + "m ago"
+            end if
+            ui.print("  " + node.public_ip + "  [" + node.lan_ip + "]  " + statusColor + node.status + "</color>  proc:" + node.process_name + "  last:" + lastUsed)
+        end for
+        ui.separator()
+
+    // ── adopt ─────────────────────────────────────────────────────────────
+    else if sub == "adopt" then
+        ui.separator()
+        ui.highlight("ROOST ADOPT — SELECT NODE")
+        ui.separator()
+
+        active = dbManager.roostDb.listActive()
+        if active.len == 0 then
+            return Error.New("No active roost nodes. Run: flock deploy", "NO_NODES")
+        end if
+
+        // Display numbered list
+        idx = 0
+        for node in active
+            lastUsed = "never"
+            if node.last_used > 0 then
+                lastUsed = str(floor((time - node.last_used) / 60)) + "m ago"
+            end if
+            ui.print("  [" + str(idx) + "]  " + node.public_ip + "  [" + node.lan_ip + "]  proc:" + node.process_name + "  last:" + lastUsed)
+            idx = idx + 1
+        end for
+        ui.print("")
+
+        answer = user_input("Select node (index or IP): ", false)
+        if answer == null or answer.trim == "" then
+            return
+        end if
+
+        // Resolve by index or IP
+        selectedNode = null
+        answerTrimmed = answer.trim
+        isNumeric = true
+        for ch in answerTrimmed
+            if "0123456789".indexOf(ch) == null then
+                isNumeric = false
+            end if
+        end for
+
+        if isNumeric then
+            nodeIdx = answerTrimmed.val
+            if nodeIdx >= 0 and nodeIdx < active.len then
+                selectedNode = active[nodeIdx]
+            end if
+        else
+            for node in active
+                if node.public_ip == answerTrimmed then
+                    selectedNode = node
+                    break
+                end if
+            end for
+        end if
+
+        if selectedNode == null then
+            return Error.New("No node found for: " + answerTrimmed, "NOT_FOUND")
+        end if
+
+        // Hand off to shared adoption logic
+        adoptResult = roostManager.adoptNode(selectedNode, mediator)
+        if adoptResult isa Error then
+            return adoptResult
+        end if
+
+    // ── pick ─────────────────────────────────────────────────────────────
+    else if sub == "pick" then
+        ui.separator()
+        ui.highlight("PICKING ROOST NODE")
+        ui.separator()
+
+        node = dbManager.roostDb.pickLeastUsed()
+        if node == null then
+            return Error.New("No active roost nodes. Run: flock deploy", "NO_NODES")
+        end if
+
+        ui.info("Auto-selected: " + node.public_ip + " (least recently used)")
+        adoptResult = roostManager.adoptNode(node, mediator)
+        if adoptResult isa Error then
+            return adoptResult
+        end if
+
+    // ── verify ───────────────────────────────────────────────────────────
+    else if sub == "verify" then
+        ui.separator()
+        ui.highlight("VERIFYING ROOST NODES")
+        ui.separator()
+
+        nodes = dbManager.roostDb.records
+        if nodes.len == 0 then
+            ui.warning("No roost nodes registered.")
+            ui.separator()
+            return
+        end if
+
+        meta = include_lib("/lib/metaxploit.so")
+        shells = []
+        if meta != null then
+            s = meta.rshell_server()
+            if s != null then
+                shells = s
+            end if
+        end if
+
+        // Build set of connected IPs
+        connectedIps = []
+        for sh in shells
+            if typeof(sh) != "shell" then
+                continue
+            end if
+            comp = sh.host_computer
+            if comp != null then
+                connectedIps.push(comp.public_ip)
+            end if
+        end for
+
+        for node in nodes
+            if connectedIps.indexOf(node.public_ip) != null then
+                node.status = ROOST_STATUS.ACTIVE
+                ui.success("  " + node.public_ip + " - active")
+            else
+                node.status = ROOST_STATUS.DEAD
+                ui.warning("  " + node.public_ip + " - dead (no flock connection)")
+            end if
+        end for
+
+        dbManager.save()
+        ui.separator()
+
+    // ── nuke ─────────────────────────────────────────────────────────────
+    else if sub == "nuke" then
+        ui.separator()
+        ui.highlight("ROOST NUKE")
+        ui.separator()
+
+        currentSession = sessionManager.currentSession
+        pivotSession   = sessionManager.pivotSession
+
+        if currentSession == pivotSession then
+            return Error.New("Cannot nuke Nest", "IS_PIVOT")
+        end if
+
+        ip = currentSession.data.ip.public
+
+        // Find the roost node record
+        node = dbManager.roostDb.find(ip)
+        if node == null then
+            ui.warning("  " + ip + " not found in roost pool - attempting cleanup anyway")
+        end if
+
+        handler = currentSession.handler
+        procName = ""
+        if node != null then
+            procName = node.process_name
+        end if
+
+        // Kill the roost process
+        if procName.len > 0 then
+            ui.info("Killing process: " + procName)
+            procs = handler.showProcs()
+            if not (procs isa Error) then
+                for proc in procs
+                    if proc.hasIndex("COMMAND") and proc.hasIndex("PID") then
+                        if proc.COMMAND == procName then
+                            pid = proc.PID.val
+                            if pid > 0 then
+                                handler.shell.shell.host_computer.close_program(pid)
+                                ui.success("  Killed " + procName + " (PID " + proc.PID + ")")
+                            end if
+                        end if
+                    end if
+                end for
+            end if
+        end if
+
+        // Delete deployed files in /shiny
+        shinyDir = handler.getFile("/shiny")
+        if not (shinyDir isa Error) then
+            kids = shinyDir.children()
+            if not (kids isa Error) then
+                for kid in kids
+                    if kid.owner() == handler.user then
+                        kid.delete()
+                        ui.success("  Deleted /shiny/" + kid.name())
+                    end if
+                end for
+            end if
+        end if
+
+        // Delete roost-client binary
+        cbFile = handler.getFile("/root/roost-client")
+        if not (cbFile isa Error) then
+            cbFile.delete()
+            ui.success("  Deleted /root/roost-client")
+        end if
+
+        // Remove from roost pool
+        if node != null then
+            dbManager.roostDb.remove(ip)
+            dbManager.save()
+            ui.success("  Removed " + ip + " from roost pool")
+        end if
+
+        // Leave this session via the standard back() path
+        ui.info("Backing out...")
+        backResult = sessionManager.back()
+        if backResult isa Error then
+            ui.warning("Could not back out cleanly: " + backResult.message)
+        end if
+
+        // Restore Nest's metaxploit as the current lib
+        libManager = mediator.getExtension("libManager")
+        pivotMeta = libManager.getPivotLib(LIB_TYPES.METAXPLOIT)
+        if pivotMeta != null then
+            libManager.setCurrentLib(pivotMeta)
+        end if
+
+        ui.success("Roost node nuked. Now on: " + sessionManager.currentSession.label)
+        ui.info("Manual LogViewer cleanup recommended on the nuked node.")
+        ui.separator()
+
+    // ── sweep ────────────────────────────────────────────────────────────
+    else if sub == "sweep" then
+        ui.separator()
+        ui.highlight("ROOST REVIVAL SWEEP")
+        ui.separator()
+
+        pivotHandler = sessionManager.pivotSession.handler
+        localShell   = pivotHandler.shell.shell
+
+        // ── Part 1: Revive dead roost nodes via flock ─────────────────────
+        ui.info("Checking dead roost nodes for reconnection...")
+        nodes = dbManager.roostDb.records
+        meta = include_lib("/lib/metaxploit.so")
+        shells = []
+        if meta != null then
+            s = meta.rshell_server()
+            if s != null then
+                shells = s
+            end if
+        end if
+
+        connectedIps = []
+        for sh in shells
+            if typeof(sh) != "shell" then
+                continue
+            end if
+            comp = sh.host_computer
+            if comp != null then
+                connectedIps.push(comp.public_ip)
+            end if
+        end for
+
+        revived = 0
+        stillDead = 0
+        alreadyOk = 0
+
+        for node in nodes
+            if node.status == ROOST_STATUS.ACTIVE then
+                alreadyOk = alreadyOk + 1
+                continue
+            end if
+            found = false
+            for cIp in connectedIps
+                if cIp == node.public_ip then
+                    found = true
+                end if
+            end for
+            if found then
+                node.status = ROOST_STATUS.ACTIVE
+                ui.success("  Revived: " + node.public_ip)
+                revived = revived + 1
+            else
+                ui.dim("  Still dead: " + node.public_ip)
+                stillDead = stillDead + 1
+            end if
+        end for
+
+        ui.info("Revived: " + str(revived) + "  Still dead: " + str(stillDead) + "  Active: " + str(alreadyOk))
+        ui.print("")
+
+        // ── Part 2: Scan owned targets for SSH+root eligibility ───────────
+        ui.info("Scanning owned targets for SSH/root eligibility...")
+        allTargets = dbManager.allTargets()
+        activeRoostIps = []
+        for node in nodes
+            activeRoostIps.push(node.public_ip)
+        end for
+
+        candidates = 0
+        promoted = 0
+
+        for target in allTargets
+            targetIp = target.public_ip
+            if targetIp == null or targetIp.len == 0 then
+                continue
+            end if
+            // Skip if already a roost
+            alreadyRoost = false
+            for rIp in activeRoostIps
+                if rIp == targetIp then
+                    alreadyRoost = true
+                end if
+            end for
+            if alreadyRoost then
+                continue
+            end if
+            // Skip if not owned
+            if not target.hasIndex("status") then
+                continue
+            end if
+            if target.status != "owned" and target.status != "exploited" then
+                continue
+            end if
+            // Check for root SSH credentials
+            targetCreds = dbManager.findCredentialsByIp(targetIp)
+            rootCred = null
+            for cred in targetCreds
+                if cred.username == "root" and cred.type == "system" then
+                    rootCred = cred
+                    break
+                end if
+            end for
+            if rootCred == null then
+                continue
+            end if
+            // Check if target has SSH port
+            hasSSH = false
+            if target.hasIndex("ports") then
+                for port in target.ports
+                    if port.hasIndex("service") and port.service == "ssh" then
+                        hasSSH = true
+                    end if
+                end for
+            end if
+            if not hasSSH then
+                continue
+            end if
+            candidates = candidates + 1
+            // Attempt SSH connection
+            ui.info("  Trying " + targetIp + "...")
+            testShell = localShell.connect_service(targetIp, 22, "root", rootCred.password, "ssh")
+            if typeof(testShell) != "shell" then
+                ui.dim("  " + targetIp + " — SSH failed")
+                continue
+            end if
+            // Eligible — add to roost pool
+            dbManager.roostDb.add(targetIp, target.lan_ip, "")
+            ui.success("  " + targetIp + " — added to roost pool")
+            promoted = promoted + 1
+        end for
+
+        if revived > 0 or promoted > 0 then
+            dbManager.save()
+        end if
+
+        ui.print("")
+        ui.info("New roost candidates found: " + str(candidates))
+        ui.success("Added to roost pool: " + str(promoted))
+        ui.separator()
+
+    // ── clean ────────────────────────────────────────────────────────────
+    else if sub == "clean" then
+        ui.separator()
+        ui.highlight("CLEANING DEAD ROOST NODES")
+        ui.separator()
+
+        nodes = dbManager.roostDb.records
+        if nodes.len == 0 then
+            ui.info("No roost nodes registered.")
+            ui.separator()
+            return
+        end if
+
+        // Collect dead node IPs
+        dead = []
+        for node in nodes
+            if node.status == ROOST_STATUS.DEAD then
+                dead.push(node.public_ip)
+            end if
+        end for
+
+        if dead.len == 0 then
+            ui.info("No dead nodes to clean.")
+            ui.info("Run 'roost verify' first to update node statuses.")
+            ui.separator()
+            return
+        end if
+
+        ui.info("Dead nodes found: " + dead.join(", "))
+        ui.print("")
+
+        // Offer to archive before removing
+        archiveAnswer = user_input("  Archive dead node IPs before removing? (yes/no): ").trim
+        if archiveAnswer == "yes" or archiveAnswer == "y" then
+            pivotHandler = sessionManager.pivotSession.handler
+            pivotComp = pivotHandler.shell.shell.host_computer
+
+            archivePath = "/Corvid/Data/dead_roost.txt"
+            archiveContent = ""
+            existingFile = pivotComp.File(archivePath)
+            if existingFile != null then
+                archiveContent = existingFile.get_content
+                if archiveContent == null then
+                    archiveContent = ""
+                end if
+            end if
+
+            if archiveContent.len > 0 then
+                archiveContent = archiveContent + char(10)
+            end if
+            archiveContent = archiveContent + dead.join(char(10))
+
+            dataDir = pivotHandler.getFile("/Corvid/Data")
+            if dataDir isa Error then
+                pivotComp.create_folder("/Corvid", "Data")
+            end if
+            pivotComp.touch("/Corvid/Data", "dead_roost.txt")
+            archFile = pivotComp.File(archivePath)
+            if archFile != null then
+                archFile.set_content(archiveContent)
+                ui.success("Archived to " + archivePath)
+            end if
+        end if
+
+        // Remove dead nodes from pool
+        kept = 0
+        for node in nodes
+            if node.status != ROOST_STATUS.DEAD then
+                kept = kept + 1
+            end if
+        end for
+
+        for dIp in dead
+            dbManager.roostDb.remove(dIp)
+        end for
+
+        dbManager.save()
+
+        ui.success("Removed: " + str(dead.len) + "  Kept: " + str(kept))
+        if archiveAnswer == "yes" or archiveAnswer == "y" then
+            ui.info("View archive: cat /Corvid/Data/dead_roost.txt")
+        end if
+        ui.separator()
+
+    end if
+end function
+commandManager.register(_cmd)
+
+// ── platform ──────────────────────────────────────────────────────────────
+_cmd = new Command
+_cmd.name = "platform"
+_cmd.description = "Attack platform management. Subcommands: deploy sleep status wipe attack routerattack build"
+_cmd.parameters = [OptionsParameter.New({"name": "subcommand", "required": true, "options": {"deploy": "deploy", "sleep": "sleep", "status": "status", "wipe": "wipe", "attack": "attack", "routerattack": "routerattack", "build": "build"}}), StringParameter.New({"name": "subcommand2", "required": false, "default": ""}), StringParameter.New({"name": "targetIp", "required": false, "default": ""}), StringParameter.New({"name": "lanIp", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui              = mediator.getExtension("corvidUi")
+    sessionManager  = mediator.getExtension("sessionManager")
+    dbManager       = mediator.getExtension("databaseManager")
+    platformManager = mediator.getExtension("platformManager")
+    sub             = params.subcommand
+
+    currentSession = sessionManager.currentSession
+    pivotSession   = sessionManager.pivotSession
+
+    // ── activate ─────────────────────────────────────────────────────────
+    if sub == "deploy" then
+        ui.separator()
+        ui.highlight("DEPLOYING ATTACK PLATFORM")
+        ui.separator()
+        result = platformManager.activate()
+        if result isa Error then
+            return result
+        end if
+
+        // Pre-upload attack binaries to node so attacks don't need to upload each time
+        nodeHandler  = sessionManager.currentSession.handler
+        nodeShell    = nodeHandler.shell.shell
+        nodeComp     = nodeShell.host_computer
+        pivotHandler = pivotSession.handler
+        pivotShell   = pivotHandler.shell.shell
+
+        binNames = ["node-attacker", "node-router"]
+        for binName in binNames
+            existing = nodeComp.File("/shiny/" + binName)
+            if existing != null then
+                ui.dim("  " + binName + " already on node")
+                continue
+            end if
+            nestBin = pivotHandler.getFile("/Corvid/tools/" + binName)
+            if nestBin isa Error then
+                ui.warning("  " + binName + " not found on Nest - run: platform build")
+                continue
+            end if
+            scpRes = pivotShell.scp("/Corvid/tools/" + binName, "/shiny", nodeShell)
+            if typeof(scpRes) == "string" and scpRes.len > 0 then
+                ui.warning("  Could not upload " + binName + ": " + scpRes)
+            else
+                ui.success("  Uploaded " + binName + " to node")
+            end if
+        end for
+
+        ui.print("")
+        ui.info("Attacks will now originate from: " + platformManager.nodeIp)
+        ui.info("Run: platform sleep  to pause without cleaning")
+        ui.info("Run: platform wipe   to clean and deactivate")
+        ui.dim("Note: scan and build operations run on node hardware - may be slower than Nest")
+        ui.separator()
+
+    // ── deactivate ───────────────────────────────────────────────────────
+    else if sub == "sleep" then
+        ui.separator()
+        platformManager.deactivate()
+        ui.info("Note: uploaded libs still on node - run: platform wipe  to remove them")
+        ui.separator()
+
+    // ── status ───────────────────────────────────────────────────────────
+    else if sub == "status" then
+        ui.separator()
+        ui.highlight("PLATFORM STATUS")
+        ui.separator()
+        if not platformManager.active then
+            ui.print("  Status     : inactive")
+            ui.print("  Origin     : Nest (all attacks from your machine)")
+        else
+            ui.print("  Status     : ACTIVE")
+            ui.print("  Node       : " + platformManager.nodeIp)
+            ui.print("  Meta path  : " + platformManager.metaPath)
+            ui.print("  Crypto path: " + platformManager.cryptoPath)
+            if platformManager.uploadedMeta then
+                ui.print("  Uploaded   : metaxploit.so")
+            end if
+            if platformManager.uploadedCrypto then
+                ui.print("  Uploaded   : crypto.so")
+            end if
+        end if
+        ui.separator()
+
+    // ── wipe ─────────────────────────────────────────────────────────────
+    else if sub == "wipe" then
+        ui.separator()
+        ui.highlight("WIPING PLATFORM NODE")
+        ui.separator()
+        if not platformManager.active then
+            return Error.New("Platform not active - nothing to wipe", "NOT_ACTIVE")
+        end if
+        ui.info("Removing uploaded files from " + platformManager.nodeIp + "...")
+        platformManager.wipe()
+        ui.info("Node cleaned. Platform sleeping.")
+        ui.separator()
+
+    // ── attack ───────────────────────────────────────────────────────────
+    else if sub == "attack" then
+        ui.separator()
+        ui.highlight("PLATFORM ATTACK")
+        ui.separator()
+
+        if not platformManager.active then
+            return Error.New("Platform not active - run: platform deploy", "NOT_ACTIVE")
+        end if
+
+        // Get target
+        targetIp = params.targetIp.trim
+        lanIp    = params.subcommand2.trim
+        if targetIp.len == 0 then
+            targetIp = user_input("  Target public IP: ").trim
+        end if
+        if targetIp.len == 0 then
+            return Error.New("Target IP required", "MISSING_PARAM")
+        end if
+
+        // Get optional credentials - check params first then DB
+        jobUser = ""
+        jobPass = ""
+        if params.lanIp.trim.len > 0 then
+            // params: attack <ip> [lan] [user] [pass]
+            // reuse lanIp field for user, lanIp field... need rethink
+            // Actually handled via subcommand2=lanIp, targetIp=ip
+            // user and pass come from DB auto-populate below
+        end if
+
+        // Auto-populate credentials from DB if available
+        allCreds = dbManager.findCredentialsByIp(targetIp)
+        for c in allCreds
+            if c.type == "system" and c.username != "root" and c.password.len > 0 then
+                if jobUser.len == 0 then
+                    jobUser = c.username
+                    jobPass = c.password
+                end if
+            end if
+        end for
+        if lanIp.len > 0 then
+            lanCreds = dbManager.findCredentialsByIp(lanIp)
+            for c in lanCreds
+                if c.type == "system" and c.username != "root" and c.password.len > 0 then
+                    if jobUser.len == 0 then
+                        jobUser = c.username
+                        jobPass = c.password
+                    end if
+                end if
+            end for
+        end if
+
+        platformAttack(targetIp, lanIp, jobUser, jobPass, mediator, platformManager)
+
+    // ── routerattack ─────────────────────────────────────────────────────
+    else if sub == "routerattack" then
+        ui.separator()
+        ui.highlight("PLATFORM ROUTER ATTACK")
+        ui.separator()
+
+        if not platformManager.active then
+            return Error.New("Platform not active - run: platform deploy", "NOT_ACTIVE")
+        end if
+
+        targetIp = params.targetIp.trim
+        lanIp    = params.subcommand2.trim
+        if targetIp.len == 0 then
+            targetIp = user_input("  Router public IP: ").trim
+        end if
+        if targetIp.len == 0 then
+            return Error.New("Target IP required", "MISSING_PARAM")
+        end if
+
+        // Try to auto-populate LAN IP from DB
+        if lanIp.len == 0 then
+            tgts = dbManager.findTarget(targetIp)
+            for tgt in tgts
+                if tgt.hasIndex("lan_ip") and tgt.lan_ip.len > 0 then
+                    if lanIp.len == 0 then
+                        lanIp = tgt.lan_ip
+                    end if
+                end if
+            end for
+        end if
+
+        if lanIp.len == 0 then
+            ui.warning("No LAN IP found in DB for this target.")
+            ui.info("The primary goal of a router attack is mail credentials")
+            ui.info("and usernames from the LAN machine. Without a LAN IP,")
+            ui.info("results will be limited to router-level access only.")
+            ui.info("Run nmap on the public IP first to discover LAN machines.")
+            ui.print("")
+            lanIp = user_input("  LAN target IP (enter to continue without): ").trim
+        else
+            ui.info("LAN target auto-populated from DB: " + lanIp)
+        end if
+
+        // Auto-populate root credentials from DB
+        jobUser = ""
+        jobPass = ""
+        allCreds = dbManager.findCredentialsByIp(targetIp)
+        for c in allCreds
+            if c.type == "system" and c.username == "root" and c.password.len > 0 then
+                if jobPass.len == 0 then
+                    jobUser = "root"
+                    jobPass = c.password
+                end if
+            end if
+        end for
+        if jobPass.len > 0 then
+            ui.info("Root credentials found in DB - will attempt GCO escalation")
+        end if
+
+        platformRouterAttack(targetIp, lanIp, jobUser, jobPass, mediator, platformManager)
+
+    // ── build ────────────────────────────────────────────────────────────
+    else if sub == "build" then
+        ui.separator()
+        ui.highlight("BUILDING PLATFORM BINARIES")
+        ui.separator()
+
+        pivotHandler = pivotSession.handler
+        pivotShell   = pivotHandler.shell.shell
+        pivotComp    = pivotShell.host_computer
+
+        // Ensure tools dir exists
+        toolsDir = pivotHandler.getFile("/Corvid/tools")
+        if toolsDir isa Error then
+            pivotComp.create_folder("/Corvid", "tools")
+        end if
+
+        // Build node-attacker
+        srcFile = pivotHandler.getFile("/Corvid/tools/node-attacker.src")
+        if srcFile isa Error then
+            ui.warning("node-attacker.src not found - copy from Corvid source zip to /Corvid/tools/")
+        else
+            ui.info("Compiling node-attacker.src...")
+            buildResult = pivotShell.build("/Corvid/tools/node-attacker.src", "/Corvid/tools")
+            if typeof(buildResult) == "string" and buildResult.len > 0 then
+                ui.warning("node-attacker build failed: " + buildResult)
+            else
+                builtFile = pivotHandler.getFile("/Corvid/tools/node-attacker")
+                if builtFile isa Error then
+                    ui.warning("node-attacker binary not found after build")
+                else
+                    ui.success("node-attacker built at /Corvid/tools/node-attacker")
+                end if
+            end if
+        end if
+
+        // Build node-router
+        routerSrc = pivotHandler.getFile("/Corvid/tools/node-router.src")
+        if routerSrc isa Error then
+            ui.warning("node-router.src not found - copy from Corvid source zip to /Corvid/tools/")
+        else
+            ui.info("Compiling node-router.src...")
+            buildResult2 = pivotShell.build("/Corvid/tools/node-router.src", "/Corvid/tools")
+            if typeof(buildResult2) == "string" and buildResult2.len > 0 then
+                ui.warning("node-router build failed: " + buildResult2)
+            else
+                builtFile2 = pivotHandler.getFile("/Corvid/tools/node-router")
+                if builtFile2 isa Error then
+                    ui.warning("node-router binary not found after build")
+                else
+                    ui.success("node-router built at /Corvid/tools/node-router")
+                end if
+            end if
+        end if
+
+        ui.info("Run: platform deploy  then: platform attack <ip>  or  platform routerattack <ip>")
+        ui.separator()
+
+    end if
+end function
+commandManager.register(_cmd)
+
+// ── dbsync ────────────────────────────────────────────────────────────────
+_cmd = new Command
+_cmd.name = "dbsync"
+_cmd.description = "Sync DB files to/from another Corvid server. Subcommands: push pull"
+_cmd.parameters = [OptionsParameter.New({"name": "subcommand", "required": true, "options": {"push": "push", "pull": "pull"}})]
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "root"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    sub            = params.subcommand
+
+    ui.separator()
+    if sub == "push" then
+        ui.highlight("DBSYNC PUSH  -  send local DB to remote server")
+    else
+        ui.highlight("DBSYNC PULL  -  fetch remote DB to local incoming/")
+    end if
+    ui.separator()
+
+    // Prompt for remote server details
+    remoteIp   = user_input("  Remote server IP: ").trim
+    remoteUser = user_input("  Username: ").trim
+    remotePass = user_input("  Password: ").trim
+
+    if remoteIp.len == 0 or remoteUser.len == 0 or remotePass.len == 0 then
+        return Error.New("IP, username and password are all required", "MISSING_PARAM")
+    end if
+
+    // Connect to remote server
+    ui.info("Connecting to " + remoteUser + "@" + remoteIp + "...")
+    pivotHandler = sessionManager.pivotSession.handler
+    conn = pivotHandler.shell.shell.connect_service(remoteIp, 22, remoteUser, remotePass, "ssh")
+    if typeof(conn) != "shell" then
+        return Error.New("Could not connect to " + remoteIp + " - check credentials", "CONNECT_FAILED")
+    end if
+    ui.success("Connected")
+
+    remoteComp = conn.host_computer
+
+    dbFiles = [
+        "persons.json",
+        "orgs.json",
+        "credentials.json",
+        "targets.json",
+        "exploit-kb.json",
+        "roost.json",
+    ]
+
+    localComp = pivotHandler.shell.shell.host_computer
+
+    // ── push: read local files, write to remote /Corvid/Data/incoming/ ────
+    if sub == "push" then
+        // Ensure incoming dir exists on remote
+        incomingDir = remoteComp.File("/Corvid/Data/incoming")
+        if incomingDir == null then
+            remoteComp.create_folder("/Corvid/Data", "incoming")
+        end if
+
+        transferred = 0
+        for fname in dbFiles
+            localFile = localComp.File("/Corvid/Data/" + fname)
+            if localFile == null then
+                ui.dim("  " + fname + " - not found locally, skipping")
+                continue
+            end if
+            content = localFile.get_content
+            if content == null or content.len == 0 then
+                ui.dim("  " + fname + " - empty, skipping")
+                continue
+            end if
+            // Write to remote incoming dir
+            remoteComp.touch("/Corvid/Data/incoming", fname)
+            remoteFile = remoteComp.File("/Corvid/Data/incoming/" + fname)
+            if remoteFile == null then
+                ui.warning("  " + fname + " - could not create on remote")
+                continue
+            end if
+            remoteFile.set_content(content)
+            ui.success("  " + fname + " -> remote /Corvid/Data/incoming/")
+            transferred = transferred + 1
+        end for
+
+        ui.print("")
+        ui.success("Pushed " + str(transferred) + "/" + str(dbFiles.len) + " files")
+        ui.info("Run 'dbmerge' on the remote server to merge incoming files into its DB")
+
+    // ── pull: read remote files, write to local /Corvid/Data/incoming/ ───
+    else
+        // Ensure local incoming dir exists
+        incomingDir = localComp.File("/Corvid/Data/incoming")
+        if incomingDir == null then
+            localComp.create_folder("/Corvid/Data", "incoming")
+        end if
+
+        transferred = 0
+        for fname in dbFiles
+            remoteFile = remoteComp.File("/Corvid/Data/" + fname)
+            if remoteFile == null then
+                ui.dim("  " + fname + " - not found on remote, skipping")
+                continue
+            end if
+            content = remoteFile.get_content
+            if content == null or content.len == 0 then
+                ui.dim("  " + fname + " - empty on remote, skipping")
+                continue
+            end if
+            // Write to local incoming dir
+            localComp.touch("/Corvid/Data/incoming", fname)
+            localFile = localComp.File("/Corvid/Data/incoming/" + fname)
+            if localFile == null then
+                ui.warning("  " + fname + " - could not create locally")
+                continue
+            end if
+            localFile.set_content(content)
+            ui.success("  remote " + fname + " -> /Corvid/Data/incoming/")
+            transferred = transferred + 1
+        end for
+
+        ui.print("")
+        ui.success("Pulled " + str(transferred) + "/" + str(dbFiles.len) + " files")
+        ui.info("Run 'dbmerge' to merge incoming files into local DB")
+    end if
+
+    ui.separator()
+end function
+commandManager.register(_cmd)
+
+// ── dbmerge ───────────────────────────────────────────────────────────────
+_cmd = new Command
+_cmd.name = "dbmerge"
+_cmd.description = "Merge DB files from /Corvid/Data/incoming/ into live DB"
+_cmd.parameters = []
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui        = mediator.getExtension("corvidUi")
+    dbManager = mediator.getExtension("databaseManager")
+
+    ui.separator()
+    ui.highlight("DBMERGE  -  merging incoming DB files into live DB")
+    ui.separator()
+
+    pivotHandler = mediator.getExtension("sessionManager").pivotSession.handler
+    pivotComp    = pivotHandler.shell.shell.host_computer
+
+    incomingDir = pivotComp.File("/Corvid/Data/incoming")
+    if incomingDir == null then
+        return Error.New("No incoming/ directory found - run dbsync push or pull first", "NO_INCOMING")
+    end if
+
+    // ── Persons ───────────────────────────────────────────────────────────
+    personsFile = pivotComp.File("/Corvid/Data/incoming/persons.json")
+    personsMerged = 0
+    if personsFile != null then
+        raw = personsFile.get_content
+        if raw != null and raw.len > 0 then
+            incoming = parse(raw)
+            if incoming != null then
+                // persons.json is a map keyed by id - iterate values
+                for kv in incoming
+                    rec = kv.value
+                    if typeof(rec) == "map" and rec.hasIndex("email") then
+                        dbManager.upsertPerson(rec)
+                        personsMerged = personsMerged + 1
+                    end if
+                end for
+            end if
+        end if
+    end if
+    ui.success("Persons merged: " + str(personsMerged))
+
+    // ── Orgs ──────────────────────────────────────────────────────────────
+    orgsFile = pivotComp.File("/Corvid/Data/incoming/orgs.json")
+    orgsMerged = 0
+    if orgsFile != null then
+        raw = orgsFile.get_content
+        if raw != null and raw.len > 0 then
+            incoming = parse(raw)
+            if incoming != null then
+                for kv in incoming
+                    rec = kv.value
+                    if typeof(rec) == "map" and rec.hasIndex("domain") then
+                        dbManager.upsertOrg(rec)
+                        orgsMerged = orgsMerged + 1
+                    end if
+                end for
+            end if
+        end if
+    end if
+    ui.success("Orgs merged: " + str(orgsMerged))
+
+    // ── Credentials ───────────────────────────────────────────────────────
+    credsFile = pivotComp.File("/Corvid/Data/incoming/credentials.json")
+    credsMerged = 0
+    if credsFile != null then
+        raw = credsFile.get_content
+        if raw != null and raw.len > 0 then
+            incoming = parse(raw)
+            if incoming != null then
+                for kv in incoming
+                    rec = kv.value
+                    if typeof(rec) == "map" and rec.hasIndex("type") then
+                        dbManager.upsertCredential(rec)
+                        credsMerged = credsMerged + 1
+                    end if
+                end for
+            end if
+        end if
+    end if
+    ui.success("Credentials merged: " + str(credsMerged))
+
+    // ── Targets ───────────────────────────────────────────────────────────
+    targetsFile = pivotComp.File("/Corvid/Data/incoming/targets.json")
+    targetsMerged = 0
+    if targetsFile != null then
+        raw = targetsFile.get_content
+        if raw != null and raw.len > 0 then
+            incoming = parse(raw)
+            if incoming != null then
+                for kv in incoming
+                    rec = kv.value
+                    if typeof(rec) == "map" and rec.hasIndex("public_ip") then
+                        dbManager.upsertTarget(rec)
+                        targetsMerged = targetsMerged + 1
+                    end if
+                end for
+            end if
+        end if
+    end if
+    ui.success("Targets merged: " + str(targetsMerged))
+
+    // ── Exploit KB ────────────────────────────────────────────────────────
+    // KB records are merged directly - we don't call kbRecord() because
+    // that increments success_count. Instead we upsert raw records,
+    // respecting outcome priority: success > constraint_blocked > uncertain.
+    kbFile = pivotComp.File("/Corvid/Data/incoming/exploit-kb.json")
+    kbMerged = 0
+    if kbFile != null then
+        raw = kbFile.get_content
+        if raw != null and raw.len > 0 then
+            incoming = parse(raw)
+            if incoming != null then
+                outcomeOrder = ["uncertain", "constraint_blocked", "success"]
+                kbObj = dbManager.getExploitKb()
+                for kv in incoming
+                    rec = kv.value
+                    if not (typeof(rec) == "map") then
+                        continue
+                    end if
+                    if not rec.hasIndex("lib_name") then
+                        continue
+                    end if
+                    // Find existing record by iterating all KB records
+                    existRec = null
+                    allKbRecords = kbObj.db.all()
+                    for kr in allKbRecords
+                        if not kr.hasIndex("lib_name") then
+                            continue
+                        end if
+                        if not kr.hasIndex("lib_version") then
+                            continue
+                        end if
+                        if not kr.hasIndex("address") then
+                            continue
+                        end if
+                        if not kr.hasIndex("exploit") then
+                            continue
+                        end if
+                        if kr.lib_name == rec.lib_name and kr.lib_version == rec.lib_version and kr.address == rec.address and kr.exploit == rec.exploit then
+                            existRec = kr
+                            break
+                        end if
+                    end for
+                    if existRec != null then
+                        // Only upgrade outcome, never downgrade
+                        existOutcomeIdx    = outcomeOrder.indexOf(existRec.outcome)
+                        incomingOutcomeIdx = outcomeOrder.indexOf(rec.outcome)
+                        if existOutcomeIdx == null then
+                            existOutcomeIdx = 0
+                        end if
+                        if incomingOutcomeIdx == null then
+                            incomingOutcomeIdx = 0
+                        end if
+                        if incomingOutcomeIdx > existOutcomeIdx then
+                            existRec.outcome = rec.outcome
+                            if rec.hasIndex("rtype") and rec.rtype.len > 0 then
+                                existRec.rtype = rec.rtype
+                            end if
+                            if rec.hasIndex("privilege") and rec.privilege.len > 0 then
+                                existRec.privilege = rec.privilege
+                            end if
+                            kbObj.db.set(existRec.id, existRec)
+                            kbObj.db.dirty = true
+                        end if
+                        // Take higher success_count
+                        if rec.hasIndex("success_count") and existRec.hasIndex("success_count") then
+                            if rec.success_count > existRec.success_count then
+                                existRec.success_count = rec.success_count
+                            end if
+                        end if
+                    else
+                        // New KB entry - insert directly
+                        newId = kbObj.db.nextId("ek")
+                        rec.id = newId
+                        kbObj.db.set(newId, rec)
+                        kbObj.db.dirty = true
+                        kbMerged = kbMerged + 1
+                    end if
+                end for
+            end if
+        end if
+    end if
+    ui.success("Exploit KB entries merged: " + str(kbMerged))
+
+    // ── Roost pool ─────────────────────────────────────────────────────
+    roostFile = pivotComp.File("/Corvid/Data/incoming/roost.json")
+    roostMerged = 0
+    if roostFile != null then
+        raw = roostFile.get_content
+        if raw != null and raw.len > 0 then
+            incoming = parse(raw)
+            if incoming != null and incoming isa list then
+                statusOrder = ["dead", "dormant", "active"]
+                for inNode in incoming
+                    if not (typeof(inNode) == "map") then
+                        continue
+                    end if
+                    if not inNode.hasIndex("public_ip") then
+                        continue
+                    end if
+                    // Find existing node by public_ip
+                    existNode = dbManager.roostDb.find(inNode.public_ip)
+                    if existNode != null then
+                        // Take more advanced status
+                        existStatusIdx   = statusOrder.indexOf(existNode.status)
+                        incomingStatusIdx = statusOrder.indexOf(inNode.status)
+                        if existStatusIdx == null then
+                            existStatusIdx = 0
+                        end if
+                        if incomingStatusIdx == null then
+                            incomingStatusIdx = 0
+                        end if
+                        if incomingStatusIdx > existStatusIdx then
+                            existNode.status = inNode.status
+                        end if
+                        // Take most recent last_used
+                        if inNode.hasIndex("last_used") and inNode.last_used > existNode.last_used then
+                            existNode.last_used = inNode.last_used
+                        end if
+                    else
+                        // New node - add to pool
+                        dbManager.roostDb.add(inNode.public_ip, inNode.lan_ip, inNode.process_name)
+                        // Set status and last_used from incoming
+                        newNode = dbManager.roostDb.find(inNode.public_ip)
+                        if newNode != null then
+                            if inNode.hasIndex("status") then
+                                newNode.status = inNode.status
+                            end if
+                            if inNode.hasIndex("last_used") then
+                                newNode.last_used = inNode.last_used
+                            end if
+                        end if
+                        roostMerged = roostMerged + 1
+                    end if
+                end for
+            end if
+        end if
+    end if
+    ui.success("Roost nodes merged: " + str(roostMerged))
+
+    // ── Save and clean up incoming ─────────────────────────────────────────
+    dbManager.save()
+    ui.success("DB saved.")
+    ui.print("")
+
+    // Offer to clean up incoming files
+    cleanAnswer = user_input("  Delete incoming/ files now? (yes/no): ").trim
+    if cleanAnswer == "yes" or cleanAnswer == "y" then
+        filesToClean = [
+            "/Corvid/Data/incoming/persons.json",
+            "/Corvid/Data/incoming/orgs.json",
+            "/Corvid/Data/incoming/credentials.json",
+            "/Corvid/Data/incoming/targets.json",
+            "/Corvid/Data/incoming/exploit-kb.json",
+            "/Corvid/Data/incoming/roost.json",
+        ]
+        for fpath in filesToClean
+            f = pivotComp.File(fpath)
+            if f != null then
+                f.delete()
+            end if
+        end for
+        ui.success("Incoming files cleaned up.")
+    end if
+
+    ui.separator()
+end function
+commandManager.register(_cmd)
+
+
+
+// ── chainsaw ──────────────────────────────────────────────────────────────
+// Builds standalone chainsaw binary for Strategy 5 GCO RCE escalation.
+// Source is at /Corvid/source/data/chainsaw (installed by installer).
+// Binary goes to /Corvid/tools/chainsaw/ where attack-manager expects it.
+_cmd = new Command
+_cmd.name = "chainsaw"
+_cmd.description = "Build standalone chainsaw binary for GCO RCE escalation. Usage: chainsaw build"
+_cmd.parameters = [OptionsParameter.New({"name": "subcommand", "required": true, "options": {"build": "build"}})]
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui           = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+
+    if params.subcommand == "build" then
+        ui.separator()
+        ui.highlight("BUILDING CHAINSAW")
+        ui.separator()
+
+        pivotHandler = sessionManager.pivotSession.handler
+        pivotShell   = pivotHandler.shell.shell
+        pivotComp    = pivotShell.host_computer
+
+        srcPath = "/Corvid/tools/chainsaw/chainsaw.src"
+        outDir  = "/Corvid/tools/chainsaw"
+
+        srcFile = pivotHandler.getFile(srcPath)
+        if srcFile isa Error then
+            return Error.New("chainsaw.src not found at " + srcPath + " - copy tools/chainsaw/ to /Corvid/tools/chainsaw/ first", "NOT_FOUND")
+        end if
+
+        outDirFile = pivotComp.File(outDir)
+        if outDirFile == null then
+            pivotComp.create_folder("/Corvid/tools", "chainsaw")
+        end if
+
+        ui.info("Compiling " + srcPath + "...")
+        buildResult = pivotShell.build(srcPath, outDir)
+        if typeof(buildResult) == "string" and buildResult.len > 0 then
+            return Error.New("Build failed: " + buildResult, "BUILD_FAILED")
+        end if
+
+        ui.success("Chainsaw compiled to " + outDir + "/chainsaw")
+        ui.info("Strategy 5 GCO RCE escalation is now ready.")
+        ui.separator()
+    end if
+end function
+commandManager.register(_cmd)
+
+// ── sniffer ───────────────────────────────────────────────────────────────
+// Deploy csniffer to current session and capture credentials.
+// Agent calls home to a specified machine (node, bounce, or anywhere).
+// Nest IP is never involved in the capture flow.
+_cmd = new Command
+_cmd.name = "sniffer"
+_cmd.description = "Credential sniffer. Subcommands: deploy collect list promote clean"
+_cmd.parameters = [StringParameter.New({"name": "subcommand", "required": false, "default": "list"}), StringParameter.New({"name": "arg", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+    configManager  = mediator.getExtension("configManager")
+
+    currentSession = sessionManager.currentSession
+    pivotSession   = sessionManager.pivotSession
+    sub = params.subcommand.trim.lower
+    arg = params.arg.trim.lower
+
+    // ── deploy ────────────────────────────────────────────────────────────
+    if sub == "deploy" then
+        if currentSession == pivotSession then
+            return Error.New("Cannot deploy sniffer on Nest - switch to a target session first", "IS_NEST")
+        end if
+        if not (currentSession.handler isa ShellSession) then
+            return Error.New("Current session must be a shell session", "NOT_SHELL")
+        end if
+
+        targetIp = currentSession.data.ip.public
+        ui.separator()
+        ui.highlight("SNIFFER DEPLOY — " + targetIp)
+        ui.separator()
+        ui.info("Captures will call home to a machine you control.")
+        ui.info("This can be a roost node, bounce, or any SSH-accessible machine.")
+        ui.print("")
+
+        homeIp   = user_input("  Call-home IP: ").trim
+        homePort = user_input("  Call-home SSH port (default 22): ").trim
+        homeUser = user_input("  Call-home username (default root): ").trim
+        homePass = user_input("  Call-home password: ").trim
+        homePath = user_input("  Capture path on call-home machine (default /shiny/sniffer): ").trim
+        capLimit = user_input("  Capture limit (0=unlimited, 1=single): ").trim
+
+        if homeIp.len == 0 then
+            return Error.New("Call-home IP required", "MISSING_PARAM")
+        end if
+        if homePass.len == 0 then
+            return Error.New("Call-home password required", "MISSING_PARAM")
+        end if
+        if homePort.len == 0 then
+            homePort = "22"
+        end if
+        if homeUser.len == 0 then
+            homeUser = "root"
+        end if
+        if homePath.len == 0 then
+            homePath = "/shiny/sniffer"
+        end if
+        if capLimit.len == 0 then
+            capLimit = "1"
+        end if
+
+        pivotHandler = pivotSession.handler
+        pivotShell   = pivotHandler.shell.shell
+        pivotComp    = pivotShell.host_computer
+        targetShell  = currentSession.handler.shell.shell
+        targetComp   = targetShell.host_computer
+
+        // ── Build csniffer on Nest ────────────────────────────────────────
+        srcFile = pivotHandler.getFile("/Corvid/tools/csniffer.src")
+        if srcFile isa Error then
+            return Error.New("csniffer.src not found at /Corvid/tools/csniffer.src - copy from Corvid source zip", "SRC_MISSING")
+        end if
+
+        existingBin = pivotHandler.getFile("/Corvid/tools/csniffer")
+        if not (existingBin isa Error) then
+            existingBin.delete()
+        end if
+
+        ui.info("Building csniffer on Nest...")
+        buildResult = pivotShell.build("/Corvid/tools/csniffer.src", "/Corvid/tools")
+        if typeof(buildResult) == "string" and buildResult.len > 0 then
+            return Error.New("Build failed: " + buildResult, "BUILD_FAILED")
+        end if
+
+        builtBin = pivotHandler.getFile("/Corvid/tools/csniffer")
+        if builtBin isa Error then
+            return Error.New("Binary not found after build", "BUILD_FAILED")
+        end if
+        ui.success("csniffer built")
+
+        // ── Create /shiny on target if needed ────────────────────────────
+        shinyOnTarget = targetComp.File("/shiny")
+        if shinyOnTarget == null then
+            targetComp.create_folder("/", "shiny")
+        end if
+
+        // ── Write config on target ────────────────────────────────────────
+        cfgContent = "home_ip=" + homeIp + char(10)
+        cfgContent = cfgContent + "home_port=" + homePort + char(10)
+        cfgContent = cfgContent + "home_user=" + homeUser + char(10)
+        cfgContent = cfgContent + "home_pass=" + homePass + char(10)
+        cfgContent = cfgContent + "home_path=" + homePath + char(10)
+        cfgContent = cfgContent + "limit=" + capLimit + char(10)
+
+        targetComp.touch("/shiny", "csniffer-config.txt")
+        cfgOnTarget = targetComp.File("/shiny/csniffer-config.txt")
+        if cfgOnTarget == null then
+            return Error.New("Could not create config on target", "FILE_ERROR")
+        end if
+        cfgOnTarget.set_content(cfgContent)
+        ui.success("Config written to target")
+
+        // ── Upload csniffer binary to target ──────────────────────────────
+        ui.info("Uploading csniffer to target...")
+        scpRes = pivotShell.scp("/Corvid/tools/csniffer", "/shiny", targetShell)
+        if typeof(scpRes) == "string" and scpRes.len > 0 then
+            return Error.New("Upload failed: " + scpRes, "UPLOAD_FAILED")
+        end if
+        ui.success("Uploaded /shiny/csniffer")
+
+        // ── Upload metaxploit.so if not present on target ─────────────────
+        metaOnTarget = targetComp.File("/lib/metaxploit.so")
+        if metaOnTarget == null then
+            metaOnTarget = targetComp.File("/shiny/metaxploit.so")
+        end if
+        if metaOnTarget == null then
+            ui.info("metaxploit.so not found on target - uploading...")
+            scpMeta = pivotShell.scp("/lib/metaxploit.so", "/shiny", targetShell)
+            if typeof(scpMeta) == "string" and scpMeta.len > 0 then
+                ui.warning("Could not upload metaxploit.so - sniffer may fail if not in /lib/")
+                configManager.set("snifferUploadedMeta", "0")
+            else
+                ui.success("Uploaded /shiny/metaxploit.so")
+                configManager.set("snifferUploadedMeta", "1")
+            end if
+        else
+            configManager.set("snifferUploadedMeta", "0")
+        end if
+
+        // ── Save call-home details to config for collect/clean ────────────
+        configManager.set("snifferHomeIp",   homeIp)
+        configManager.set("snifferHomePort", homePort)
+        configManager.set("snifferHomeUser", homeUser)
+        configManager.set("snifferHomePass", homePass)
+        configManager.set("snifferHomePath", homePath)
+        configManager.set("snifferTargetIp", targetIp)
+
+        // ── Launch ────────────────────────────────────────────────────────
+        ui.separator()
+        // Launch via /bin/bash for non-blocking execution
+        targetShell.launch("/bin/bash", "/shiny/csniffer")
+        ui.success("Sniffer launched on " + targetIp)
+        ui.info("Captures call home to " + homeIp + ":" + homePath)
+        ui.info("Run: sniffer collect  to import results")
+        ui.info("Run: sniffer clean    to remove files")
+        ui.separator()
+
+    // ── collect ───────────────────────────────────────────────────────────
+    else if sub == "collect" then
+        ui.separator()
+        ui.highlight("SNIFFER COLLECT — ROOST SWEEP")
+        ui.separator()
+
+        roostManager  = mediator.getExtension("roostManager")
+        pivotShell    = pivotSession.handler.shell.shell
+
+        activeRoosts = roostManager.listActive()
+        if activeRoosts.len == 0 then
+            ui.warning("No active roost nodes found.")
+            ui.info("Run: roost verify  to check roost health")
+            ui.separator()
+            return
+        end if
+
+        ui.info("Sweeping " + str(activeRoosts.len) + " roost node(s) for captures...")
+        ui.print("")
+
+        totalImported = 0
+        checkedCount  = 0
+
+        for roost in activeRoosts
+            roostIp = roost.public_ip
+            if roostIp.len == 0 then
+                continue
+            end if
+
+            checkedCount = checkedCount + 1
+
+            // Get root credential for this roost
+            roostPass = ""
+            roostCreds = dbManager.findCredentialsByIp(roostIp)
+            for rc in roostCreds
+                if rc.type == "system" and rc.username == "root" and rc.password.len > 0 then
+                    if roostPass.len == 0 then
+                        roostPass = rc.password
+                    end if
+                end if
+            end for
+
+            if roostPass.len == 0 then
+                ui.dim("  " + roostIp + " — no root credentials, skipping")
+                continue
+            end if
+
+            // Connect to roost
+            rShell = pivotShell.connect_service(roostIp, 22, "root", roostPass, "ssh")
+            if typeof(rShell) != "shell" then
+                ui.dim("  " + roostIp + " — could not connect, skipping")
+                continue
+            end if
+
+            rComp = rShell.host_computer
+
+            // Check for capture directory
+            capDir = rComp.File("/shiny/sniffer")
+            if capDir == null then
+                ui.dim("  " + roostIp + " — no captures")
+                continue
+            end if
+
+            capFiles = capDir.get_files()
+            if capFiles == null or capFiles.len == 0 then
+                ui.dim("  " + roostIp + " — no captures")
+                continue
+            end if
+
+            // Import captures
+            nodeImported = 0
+            for capFile in capFiles
+                if capFile.name.indexOf("sniff_") == null then
+                    continue
+                end if
+                raw = capFile.get_content
+                if raw == null or raw.len == 0 then
+                    continue
+                end if
+                dbManager.addSnifferCapture(raw.trim, roostIp)
+                capFile.delete()
+                nodeImported = nodeImported + 1
+            end for
+
+            // Delete capture directory if now empty
+            remainingFiles = capDir.get_files()
+            if remainingFiles == null or remainingFiles.len == 0 then
+                capDir.delete()
+            end if
+
+            // Wipe roost log after collecting
+            logFile = rComp.File("/var/system.log")
+            if logFile != null then
+                rComp.touch("/var", "t")
+                emptyLog = rComp.File("/var/t")
+                if emptyLog != null then
+                    emptyLog.move("/var", "system.log")
+                end if
+            end if
+
+            if nodeImported > 0 then
+                ui.success("  " + roostIp + " — imported " + str(nodeImported) + " capture(s)")
+            else
+                ui.dim("  " + roostIp + " — no captures")
+            end if
+
+            totalImported = totalImported + nodeImported
+        end for
+
+        dbManager.save()
+        ui.print("")
+
+        if totalImported == 0 then
+            ui.info("No captures found across " + str(checkedCount) + " roost(s)")
+        else
+            ui.success("Total imported: " + str(totalImported))
+            ui.info("Run: sniffer list    to review")
+            ui.info("Run: sniffer promote to add to credential DB")
+        end if
+        ui.separator()
+
+    // ── list ──────────────────────────────────────────────────────────────
+    else if sub == "list" then
+        ui.separator()
+        ui.highlight("SNIFFER CAPTURES")
+        ui.separator()
+        captures = dbManager.allSnifferCaptures()
+        if captures.len == 0 then
+            ui.warning("No sniffer captures. Run: sniffer collect")
+            ui.separator()
+            return
+        end if
+        for cap in captures
+            ui.print("")
+            ui.highlight("  " + cap.id + "  [from " + cap.captured_from + "]")
+            if cap.source_ip.len > 0 then
+                ui.info("  Source   : " + cap.source_ip)
+            end if
+            if cap.dest_ip.len > 0 then
+                ui.info("  Dest     : " + cap.dest_ip)
+            end if
+            if cap.protocol.len > 0 then
+                ui.info("  Protocol : " + cap.protocol)
+            end if
+            if cap.username.len > 0 then
+                ui.success("  Username : " + cap.username)
+            end if
+            if cap.password.len > 0 then
+                ui.success("  Password : " + cap.password)
+            end if
+            if cap.username.len == 0 then
+                ui.dim("  Raw: " + cap.raw[:80])
+            end if
+        end for
+        ui.print("")
+        ui.info("Run: sniffer promote  to add to credential DB")
+        ui.separator()
+
+    // ── promote ───────────────────────────────────────────────────────────
+    else if sub == "promote" then
+        ui.separator()
+        ui.highlight("SNIFFER PROMOTE")
+        ui.separator()
+        captures = dbManager.allSnifferCaptures()
+        if captures.len == 0 then
+            ui.warning("No sniffer captures to promote.")
+            ui.separator()
+            return
+        end if
+
+        for i in range(0, captures.len - 1)
+            cap = captures[i]
+            preview = cap.username
+            if preview.len == 0 then
+                preview = cap.raw[:40]
+            end if
+            ui.info("  [" + str(i) + "]  " + cap.dest_ip + "  " + preview)
+        end for
+
+        ui.print("")
+        choice = user_input("  Promote which? (0-" + str(captures.len - 1) + " or 'all'): ").trim.lower
+
+        toPromote = []
+        if choice == "all" then
+            toPromote = captures[0:]
+        else
+            idx = choice.val
+            if idx >= 0 and idx < captures.len then
+                toPromote = [captures[idx]]
+            else
+                return Error.New("Invalid choice", "INVALID")
+            end if
+        end if
+
+        promoted = 0
+        for cap in toPromote
+            credData = {}
+            credData.type      = "system"
+            credData.username  = cap.username
+            credData.password  = cap.password
+            credData.public_ip = cap.dest_ip
+            credData.lan_ip    = cap.source_ip
+            credData.source    = "sniffer"
+            if credData.username.len > 0 and credData.password.len > 0 then
+                dbManager.upsertCredential(credData)
+                dbManager.removeSnifferCapture(cap.id)
+                ui.success("  Promoted: " + credData.username + " / " + credData.password + " on " + credData.public_ip)
+                promoted = promoted + 1
+            else
+                ui.warning("  Could not promote " + cap.id + " - username or password empty")
+                ui.dim("  Raw: " + cap.raw[:80])
+            end if
+        end for
+
+        dbManager.save()
+        ui.success("Promoted " + str(promoted) + " capture(s).")
+        ui.separator()
+
+    // ── clean ─────────────────────────────────────────────────────────────
+    else if sub == "clean" then
+        ui.separator()
+        ui.highlight("SNIFFER CLEAN")
+        ui.separator()
+
+        // Clean target files if still on that session
+        if currentSession != pivotSession and currentSession.handler isa ShellSession then
+            targetShell2 = currentSession.handler.shell.shell
+            targetComp2  = targetShell2.host_computer
+            snifferCleanNames = ["csniffer", "csniffer-config.txt"]
+            for cleanName in snifferCleanNames
+                cf = targetComp2.File("/shiny/" + cleanName)
+                if cf != null then
+                    cf.delete()
+                    ui.success("  Removed from target: /shiny/" + cleanName)
+                end if
+            end for
+            // Only remove metaxploit.so if we uploaded it
+            // (config tracks this via snifferUploadedMeta)
+            uploadedMeta = configManager.get("snifferUploadedMeta")
+            if not (uploadedMeta isa Error) and uploadedMeta == "1" then
+                mf = targetComp2.File("/shiny/metaxploit.so")
+                if mf != null then
+                    mf.delete()
+                    ui.success("  Removed from target: /shiny/metaxploit.so")
+                end if
+            end if
+        else
+            ui.dim("  Not on target session - skipping target cleanup")
+            ui.info("  Delete /shiny/csniffer and /shiny/csniffer-config.txt manually if needed")
+        end if
+
+        // Clean capture files from call-home machine
+        homeIp2   = configManager.get("snifferHomeIp")
+        homeUser2 = configManager.get("snifferHomeUser")
+        homePass2 = configManager.get("snifferHomePass")
+        homePath2 = configManager.get("snifferHomePath")
+
+        if homeUser2 isa Error then
+            homeUser2 = "root"
+        end if
+        if homePath2 isa Error then
+            homePath2 = "/shiny/sniffer"
+        end if
+
+        if not (homeIp2 isa Error) and homeIp2.len > 0 and not (homePass2 isa Error) and homePass2.len > 0 then
+            pivotShell2 = pivotSession.handler.shell.shell
+            homeShell3  = pivotShell2.connect_service(homeIp2, 22, homeUser2, homePass2, "ssh")
+            if typeof(homeShell3) == "shell" then
+                homeComp3  = homeShell3.host_computer
+                snifferDir3 = homeComp3.File(homePath2)
+                if snifferDir3 != null then
+                    capFiles3 = snifferDir3.get_files()
+                    if capFiles3 != null and capFiles3.len > 0 then
+                        ui.warning("  " + str(capFiles3.len) + " uncollected capture(s) will be deleted.")
+                        confirm3 = user_input("  Delete anyway? (yes/no): ").trim.lower
+                        if confirm3 != "yes" and confirm3 != "y" then
+                            ui.info("  Skipping capture directory cleanup - run: sniffer collect first")
+                        else
+                            for cf3 in capFiles3
+                                cf3.delete()
+                            end for
+                            snifferDir3.delete()
+                            ui.success("  Removed capture directory: " + homePath2)
+                        end if
+                    else
+                        snifferDir3.delete()
+                        ui.success("  Removed capture directory: " + homePath2)
+                    end if
+                end if
+            else
+                ui.dim("  Could not connect to call-home machine to clean captures")
+            end if
+        end if
+
+        // Clear config
+        configManager.set("snifferHomeIp",   "")
+        configManager.set("snifferHomePass",  "")
+        configManager.set("snifferTargetIp",  "")
+
+        ui.success("Sniffer cleaned.")
+        ui.separator()
+    end if
+
+end function
+commandManager.register(_cmd)
+
+// ── platformAttack helper ──────────────────────────────────────────────────
+// Writes job file, deploys node-attacker, waits for results,
+// imports to DB, handles auto-retry on system creds found.
+
+platformAttack = function(targetIp, lanIp, jobUser, jobPass, mediator, platformManager)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+    configManager  = mediator.getExtension("configManager")
+    pivotSession   = sessionManager.pivotSession
+    pivotHandler   = pivotSession.handler
+    pivotShell     = pivotHandler.shell.shell
+
+    // Get current platform session
+    currentSession = sessionManager.currentSession
+    nodeHandler    = currentSession.handler
+    nodeShell      = nodeHandler.shell.shell
+    nodeComp       = nodeShell.host_computer
+
+    // Get Nest IP and rshell port
+    nestIp   = pivotSession.data.ip.public
+    rshellPort = configManager.get("rshellPort")
+    if rshellPort isa Error then
+        rshellPort = 1222
+    end if
+
+    // Get ports from DB for target
+    ports = []
+    targets = dbManager.findTarget(targetIp)
+    for tgt in targets
+        if tgt.hasIndex("ports") then
+            for pr in tgt.ports
+                entry = {}
+                entry.port    = pr.port
+                entry.service = pr.service
+                entry.version = pr.version
+                ports.push(entry)
+            end for
+        end if
+    end for
+
+    if ports.len == 0 then
+        ui.warning("No port data for " + targetIp + " in DB - run nmap first")
+        return
+    end if
+
+    // Get KB entries for these ports
+    kbEntries = []
+    kbAll = dbManager.exploitKb.db.all()
+    for kbRec in kbAll
+        for pr in ports
+            libKey = pr.service + "_" + pr.version
+            recLibKey = ""
+            if kbRec.hasIndex("lib_name") and kbRec.hasIndex("lib_version") then
+                recLibKey = kbRec.lib_name + "_" + kbRec.lib_version
+            end if
+            if recLibKey == libKey then
+                entry = {}
+                entry.libkey    = libKey
+                entry.address   = kbRec.address
+                entry.exploit   = kbRec.exploit
+                entry.rtype     = kbRec.rtype
+                entry.privilege = kbRec.privilege
+                kbEntries.push(entry)
+            end if
+        end for
+    end for
+
+    // Build flock client source (embed Nest IP)
+    q = char(34)
+    nl = char(10)
+    flockLines = []
+    flockLines.push("processNames = [" + q + "stick" + q + "," + q + "shiny" + q + "," + q + "grub" + q + "," + q + "wing" + q + "]")
+    flockLines.push("idx = floor(time * 13) % processNames.len")
+    flockLines.push("procName = processNames[idx]")
+    flockLines.push("meta = include_lib(" + q + "/lib/metaxploit.so" + q + ")")
+    flockLines.push("if meta == null then")
+    flockLines.push("    exit(" + q + "metaxploit not available" + q + ")")
+    flockLines.push("end" + " if")
+    flockLines.push("meta.rshell_client(" + q + nestIp + q + ", " + str(rshellPort) + ", procName)")
+    flockSrc = flockLines.join(nl)
+
+    // Build job map
+    job = {}
+    job.target_ip  = targetIp
+    job.lan_ip     = lanIp
+    job.meta_path  = platformManager.metaPath
+    job.work_path  = "/shiny"
+    job.nest_ip    = nestIp
+    job.nest_port  = rshellPort
+    job.user       = jobUser
+    job.pass       = jobPass
+    job.flock_src  = flockSrc
+    job.ports      = ports
+    job.kb_entries = kbEntries
+
+    // Ensure /shiny exists on node
+    shinyOnNode = nodeComp.File("/shiny")
+    if shinyOnNode == null then
+        nodeComp.create_folder("/", "shiny")
+    end if
+
+    // Write job file to node
+    ui.info("Writing job file to node...")
+    nodeComp.touch("/shiny", "corvid-job.json")
+    jobFile = nodeComp.File("/shiny/corvid-job.json")
+    if jobFile == null then
+        ui.warning("Could not create job file on node")
+        return
+    end if
+    jobFile.set_content(toJSON(job))
+
+    // SCP node-attacker binary to node (never the source)
+    attackerBin = nodeComp.File("/shiny/node-attacker")
+    if attackerBin == null then
+        ui.info("Uploading node-attacker binary to node...")
+        nestBin = pivotHandler.getFile("/Corvid/tools/node-attacker")
+        if nestBin isa Error then
+            ui.warning("node-attacker binary not found - run: platform build")
+            return
+        end if
+        scpRes = pivotShell.scp("/Corvid/tools/node-attacker", "/shiny", nodeShell)
+        if typeof(scpRes) == "string" and scpRes.len > 0 then
+            ui.warning("Could not upload node-attacker: " + scpRes)
+            return
+        end if
+    end if
+
+    // Delete stale results file
+    stale = nodeComp.File("/shiny/corvid-results.json")
+    if stale != null then
+        stale.delete()
+    end if
+
+    // Launch node-attacker
+    ui.info("Launching node-attacker on " + platformManager.nodeIp + "...")
+    ui.info("  Target: " + targetIp)
+    if jobUser.len > 0 then
+        ui.info("  Credentials: " + jobUser + " / " + jobPass)
+    end if
+    nodeShell.launch("/shiny/node-attacker")
+
+    // Poll for results file (max 30s)
+    ui.info("Waiting for results...")
+    waited = 0
+    resultsFile = null
+    while waited < 30
+        wait(2)
+        waited = waited + 2
+        rf = nodeComp.File("/shiny/corvid-results.json")
+        if rf != null then
+            resultsFile = rf
+            break
+        end if
+    end while
+
+    if resultsFile == null then
+        ui.warning("Timed out waiting for results - run: platform collect  to try manually")
+        return
+    end if
+
+    // Read and process results
+    platformCollectResults(resultsFile, targetIp, lanIp, mediator, platformManager)
+end function
+
+// ── platformCollectResults helper ─────────────────────────────────────────
+// Reads results file, imports to DB, handles auto-retry and guest display.
+
+platformCollectResults = function(resultsFile, targetIp, lanIp, mediator, platformManager)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+    configManager  = mediator.getExtension("configManager")
+
+    raw = resultsFile.get_content
+    if raw == null or raw.len == 0 then
+        ui.warning("Results file is empty")
+        return
+    end if
+
+    res = parse(raw)
+    if res == null then
+        ui.warning("Could not parse results file")
+        return
+    end if
+
+    ui.separator()
+    ui.highlight("PLATFORM RESULT — " + targetIp)
+    ui.separator()
+
+    // ── Import scan results to DB ────────────────────────────────────────
+    if res.hasIndex("scan_results") then
+        for sr in res.scan_results
+            srLibName    = ""
+            srLibVersion = ""
+            if sr.hasIndex("lib_name") then
+                srLibName = sr.lib_name
+            else if sr.hasIndex("service") then
+                srLibName = sr.service
+            end if
+            if sr.hasIndex("lib_version") then
+                srLibVersion = sr.lib_version
+            else if sr.hasIndex("version") then
+                srLibVersion = sr.version
+            end if
+            if srLibName.len > 0 and sr.hasIndex("address") and sr.hasIndex("exploit") then
+                dbManager.exploitKb.record(srLibName, srLibVersion, sr.address, sr.exploit, "success", "", sr.rtype, "", sr.privilege, "")
+            end if
+        end for
+    end if
+
+    // ── Import node KB entries ───────────────────────────────────────────
+    if res.hasIndex("kb_entries") then
+        for kb in res.kb_entries
+            kbLibName    = ""
+            kbLibVersion = ""
+            if kb.hasIndex("lib_name") then
+                kbLibName = kb.lib_name
+            end if
+            if kb.hasIndex("lib_version") then
+                kbLibVersion = kb.lib_version
+            end if
+            if kbLibName.len > 0 and kb.hasIndex("address") and kb.hasIndex("exploit") then
+                dbManager.exploitKb.record(kbLibName, kbLibVersion, kb.address, kb.exploit, "success", "", kb.rtype, "", kb.privilege, "")
+            end if
+        end for
+    end if
+
+    // ── Import credentials ───────────────────────────────────────────────
+    if res.hasIndex("credentials") then
+        for cred in res.credentials
+            c = {}
+            c.type      = cred.type
+            c.username  = cred.username
+            c.password  = cred.password
+            c.public_ip = targetIp
+            c.lan_ip    = lanIp
+            c.source    = "platform_attack"
+            dbManager.upsertCredential(c)
+        end for
+    end if
+
+    // ── Import passwd lines — save as note for Chainsaw cracking on Nest ──
+    if res.hasIndex("passwd_lines") and res.passwd_lines.len > 0 then
+        passwdNote = "passwd:" + res.passwd_lines.join("|")
+        tgts = dbManager.findTarget(targetIp)
+        if tgts.len > 0 then
+            dbManager.addNote("target", tgts[0].id, passwdNote)
+        end if
+    end if
+
+    // ── Update target status ─────────────────────────────────────────────
+    resultType = "none"
+    privilege  = "none"
+    if res.hasIndex("result_type") then
+        resultType = res.result_type
+    end if
+    if res.hasIndex("privilege") then
+        privilege = res.privilege
+    end if
+
+    if privilege == "root" then
+        tgts2 = dbManager.findTarget(targetIp)
+        if tgts2.len > 0 then
+            dbManager.setTargetStatus(tgts2[0].id, TARGET_STATUS.EXPLOITED)
+        end if
+    else if privilege != "none" and privilege != "unknown" then
+        tgts2 = dbManager.findTarget(targetIp)
+        if tgts2.len > 0 then
+            dbManager.setTargetStatus(tgts2[0].id, TARGET_STATUS.SCANNED)
+        end if
+    end if
+
+    dbManager.save()
+
+    // ── Display results ──────────────────────────────────────────────────
+    ui.print("  Access level : " + privilege)
+    if res.hasIndex("flock_deployed") and res.flock_deployed then
+        ui.success("  Flock client deployed - run: flock adopt")
+    end if
+
+    // ── Root or user result ──────────────────────────────────────────────
+    if privilege == "root" or (privilege != "guest" and privilege != "none" and privilege != "unknown") then
+        ui.success("  Shell obtained as: " + privilege)
+        if res.hasIndex("flock_deployed") and res.flock_deployed then
+            ui.info("  Run: flock adopt  to open session")
+        end if
+        ui.separator()
+        return
+    end if
+
+    // ── Guest result - check what was found ──────────────────────────────
+    if privilege == "guest" or resultType == "none" then
+        usernames = []
+        emails    = []
+        sysCreds  = []
+
+        if res.hasIndex("usernames") then
+            usernames = res.usernames
+        end if
+        if res.hasIndex("emails") then
+            emails = res.emails
+        end if
+        if res.hasIndex("credentials") then
+            for c in res.credentials
+                if c.type == "system" and c.password.len > 0 then
+                    sysCreds.push(c)
+                end if
+            end for
+        end if
+        // Also check mail records for passwords
+        if res.hasIndex("mail_records") then
+            for mr in res.mail_records
+                if mr.hasIndex("content") then
+                    for mline in mr.content.split(char(10))
+                        mline = mline.trim
+                        if mline.indexOf(":") != null then
+                            parts = mline.split(":")
+                            if parts.len >= 2 and parts[1].len > 0 then
+                                mc = {}
+                                mc.username = parts[0]
+                                mc.password = parts[1]
+                                mc.type     = "mail"
+                                sysCreds.push(mc)
+                                // Save mail cred to DB
+                                mailCred = {}
+                                mailCred.type      = "mail"
+                                mailCred.username  = parts[0]
+                                mailCred.password  = parts[1]
+                                mailCred.public_ip = targetIp
+                                mailCred.lan_ip    = lanIp
+                                mailCred.source    = "platform_attack"
+                                dbManager.upsertCredential(mailCred)
+                            end if
+                        end if
+                    end for
+                end if
+            end for
+        end if
+        dbManager.save()
+
+        // ── Auto-retry if system credentials found ───────────────────────
+        if sysCreds.len > 0 then
+            // Find first system (non-mail) cred
+            retryCred = null
+            for sc in sysCreds
+                if sc.type == "system" then
+                    retryCred = sc
+                end if
+            end for
+            if retryCred != null then
+                ui.info("  System credentials found - retrying with " + retryCred.username + " / " + retryCred.password + "...")
+                ui.separator()
+                platformAttack(targetIp, lanIp, retryCred.username, retryCred.password, mediator, platformManager)
+                return
+            end if
+        end if
+
+        // ── Show what was found and suggest next steps ───────────────────
+        ui.print("  Intel gathered:")
+        ui.print("")
+
+        if usernames.len > 0 then
+            ui.info("  Users found    : " + usernames.join(", "))
+        end if
+        if emails.len > 0 then
+            ui.info("  Emails found   : " + emails.join(", "))
+        end if
+        if sysCreds.len > 0 then
+            for sc in sysCreds
+                ui.info("  " + sc.type + " password : " + sc.username + " / " + sc.password)
+            end for
+        end if
+
+        ui.print("")
+        ui.separator()
+        ui.highlight("SUGGESTED NEXT STEPS")
+        ui.separator()
+
+        // If mail creds found (username + password) suggest direct attack
+        if sysCreds.len > 0 then
+            for sc in sysCreds
+                if sc.type == "mail" and sc.password.len > 0 then
+                    ui.info("  Mail credentials found - try direct attack:")
+                    ui.print("")
+                    ui.print("    platform attack " + targetIp + " [" + sc.username + "] [" + sc.password + "]")
+                    ui.print("")
+                end if
+            end for
+        end if
+
+        // If usernames/emails found but no system password - suggest Funny Game
+        if usernames.len > 0 or emails.len > 0 then
+            ui.info("  Use Funny Game social engineering:")
+            ui.print("")
+            if emails.len > 0 then
+                ui.print("    1. Open Mail.exe on your Nest")
+                ui.print("    2. Send to: " + emails[0])
+                ui.print("    3. Include your Nest IP and port " + str(configManager.get("rshellPort")))
+                ui.print("    4. Wait for flock callback: flock adopt")
+            else if usernames.len > 0 then
+                ui.print("    1. Find email for: " + usernames.join(", "))
+                ui.print("    2. Open Mail.exe on your Nest")
+                ui.print("    3. Send flock callback link")
+                ui.print("    4. Wait: flock adopt")
+            end if
+            ui.print("")
+            ui.info("  Once user access confirmed, retry:")
+            ui.print("")
+            if usernames.len > 0 then
+                ui.print("    platform attack " + targetIp + " [" + usernames[0] + "] [password]")
+            end if
+        end if
+
+        if usernames.len == 0 and emails.len == 0 and sysCreds.len == 0 then
+            ui.warning("  Nothing useful found at guest level.")
+            ui.info("  Try: portattack " + targetIp + "  for a direct approach")
+        end if
+
+        ui.separator()
+    end if
+end function
+
+// ── platformRouterAttack helper ────────────────────────────────────────────
+
+platformRouterAttack = function(targetIp, lanIp, jobUser, jobPass, mediator, platformManager)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+    configManager  = mediator.getExtension("configManager")
+    pivotSession   = sessionManager.pivotSession
+    pivotHandler   = pivotSession.handler
+    pivotShell     = pivotHandler.shell.shell
+
+    currentSession = sessionManager.currentSession
+    nodeHandler    = currentSession.handler
+    nodeShell      = nodeHandler.shell.shell
+    nodeComp       = nodeShell.host_computer
+
+    nestIp     = pivotSession.data.ip.public
+    rshellPort = configManager.get("rshellPort")
+    if rshellPort isa Error then
+        rshellPort = 1222
+    end if
+
+    // Get KB entries for this router
+    kbEntries = []
+    kbAll = dbManager.exploitKb.db.all()
+    for kbRec in kbAll
+        if not kbRec.hasIndex("lib_name") then
+            continue
+        end if
+        if typeof(kbRec.lib_name) != "string" then
+            continue
+        end if
+        if kbRec.lib_name.indexOf("kernel_router") != null then
+            entry = {}
+            entry.lib_name    = kbRec.lib_name
+            entry.lib_version = kbRec.lib_version
+            entry.address     = kbRec.address
+            entry.exploit     = kbRec.exploit
+            entry.rtype       = kbRec.rtype
+            kbEntries.push(entry)
+        end if
+    end for
+
+    // Build flock client source
+    q  = char(34)
+    nl = char(10)
+    flockLines = []
+    flockLines.push("processNames = [" + q + "stick" + q + "," + q + "shiny" + q + "," + q + "grub" + q + "," + q + "wing" + q + "]")
+    flockLines.push("idx = floor(time * 13) % processNames.len")
+    flockLines.push("procName = processNames[idx]")
+    flockLines.push("meta = include_lib(" + q + "/lib/metaxploit.so" + q + ")")
+    flockLines.push("if meta == null then")
+    flockLines.push("    exit(" + q + "metaxploit not available" + q + ")")
+    flockLines.push("end" + " if")
+    flockLines.push("meta.rshell_client(" + q + nestIp + q + ", " + str(rshellPort) + ", procName)")
+    flockSrc = flockLines.join(nl)
+
+    // Build job
+    job = {}
+    job.target_ip   = targetIp
+    job.lan_ip      = lanIp
+    job.meta_path   = platformManager.metaPath
+    job.crypto_path = platformManager.cryptoPath
+    job.nest_ip     = nestIp
+    job.nest_port   = rshellPort
+    job.flock_src   = flockSrc
+    job.user        = jobUser
+    job.pass        = jobPass
+    job.kb_entries  = kbEntries
+
+    // Ensure /shiny exists on node
+    shinyOnNode2 = nodeComp.File("/shiny")
+    if shinyOnNode2 == null then
+        nodeComp.create_folder("/", "shiny")
+    end if
+
+    // Write job file
+    ui.info("Writing router job file to node...")
+    nodeComp.touch("/shiny", "corvid-router-job.json")
+    jobFile = nodeComp.File("/shiny/corvid-router-job.json")
+    if jobFile == null then
+        ui.warning("Could not create job file on node")
+        return
+    end if
+    jobFile.set_content(toJSON(job))
+
+    // SCP node-router binary
+    routerBin = nodeComp.File("/shiny/node-router")
+    if routerBin == null then
+        ui.info("Uploading node-router binary to node...")
+        nestBin = pivotHandler.getFile("/Corvid/tools/node-router")
+        if nestBin isa Error then
+            ui.warning("node-router binary not found - run: platform build")
+            return
+        end if
+        scpRes = pivotShell.scp("/Corvid/tools/node-router", "/shiny", nodeShell)
+        if typeof(scpRes) == "string" and scpRes.len > 0 then
+            ui.warning("Could not upload node-router: " + scpRes)
+            return
+        end if
+    end if
+
+    // Delete stale results
+    stale = nodeComp.File("/shiny/corvid-router-results.json")
+    if stale != null then
+        stale.delete()
+    end if
+
+    // Launch
+    ui.info("Launching node-router on " + platformManager.nodeIp + "...")
+    ui.info("  Router: " + targetIp)
+    if lanIp.len > 0 then
+        ui.info("  LAN target: " + lanIp)
+    end if
+    nodeShell.launch("/shiny/node-router")
+
+    // Poll for results (max 30s)
+    ui.info("Waiting for results...")
+    waited = 0
+    resultsFile = null
+    while waited < 30
+        wait(2)
+        waited = waited + 2
+        rf = nodeComp.File("/shiny/corvid-router-results.json")
+        if rf != null then
+            resultsFile = rf
+            break
+        end if
+    end while
+
+    if resultsFile == null then
+        ui.warning("Timed out waiting for results - check node manually")
+        return
+    end if
+
+    platformCollectRouterResults(resultsFile, targetIp, lanIp, mediator)
+end function
+
+// ── platformCollectRouterResults helper ────────────────────────────────────
+
+platformCollectRouterResults = function(resultsFile, targetIp, lanIp, mediator)
+    ui        = mediator.getExtension("corvidUi")
+    dbManager = mediator.getExtension("databaseManager")
+
+    raw = resultsFile.get_content
+    if raw == null or raw.len == 0 then
+        ui.warning("Router results file is empty")
+        return
+    end if
+
+    res = parse(raw)
+    if res == null then
+        ui.warning("Could not parse router results")
+        return
+    end if
+
+    ui.separator()
+    ui.highlight("PLATFORM ROUTER RESULT — " + targetIp)
+    ui.separator()
+
+    if res.hasIndex("error") and res.error.len > 0 then
+        ui.warning(res.error)
+        ui.separator()
+        return
+    end if
+
+    // Import KB entries
+    if res.hasIndex("kb_entries") then
+        for kb in res.kb_entries
+            if kb.hasIndex("lib_name") and kb.hasIndex("lib_version") then
+                outcome = "success"
+                if kb.hasIndex("rtype") then
+                    if kb.rtype == "uncertain" then
+                        outcome = "uncertain"
+                    end if
+                    if kb.rtype == "number_result" then
+                        outcome = "number_result"
+                    end if
+                end if
+                rtype = ""
+                if kb.hasIndex("rtype") then
+                    rtype = kb.rtype
+                end if
+                dbManager.exploitKb.record(kb.lib_name, kb.lib_version, kb.address, kb.exploit, outcome, "", rtype, "", "guest", "")
+            end if
+        end for
+    end if
+
+    // Import credentials
+    if res.hasIndex("credentials") then
+        for cred in res.credentials
+            c = {}
+            c.type      = cred.type
+            c.username  = cred.username
+            c.password  = cred.password
+            c.public_ip = targetIp
+            c.lan_ip    = lanIp
+            c.source    = cred.source
+            if cred.hasIndex("bank_number") then
+                c.bank_number = cred.bank_number
+            end if
+            dbManager.upsertCredential(c)
+        end for
+    end if
+
+    // Import persons
+    if res.hasIndex("persons") then
+        for p in res.persons
+            pd = {}
+            pd.username  = p.username
+            pd.public_ip = targetIp
+            pd.lan_ip    = lanIp
+            pd.source    = "platform_routerattack"
+            if p.hasIndex("email") then
+                pd.email = p.email
+            end if
+            dbManager.upsertPerson(pd)
+        end for
+    end if
+
+    dbManager.save()
+
+    // Display
+    resultType = "none"
+    if res.hasIndex("result_type") then
+        resultType = res.result_type
+    end if
+
+    ui.print("  Result type  : " + resultType)
+
+    if res.hasIndex("flock_deployed") and res.flock_deployed then
+        ui.success("  Flock client deployed - run: flock adopt")
+    end if
+
+    if resultType == "shell_root" then
+        ui.success("  Escalated to root via Clover Method on router")
+    else if resultType == "shell" then
+        ui.info("  Guest shell obtained - flock deploy attempted")
+    end if
+
+    if res.hasIndex("credentials") and res.credentials.len > 0 then
+        ui.success("  " + str(res.credentials.len) + " credential(s) harvested")
+        for cred in res.credentials
+            if cred.type == "mail" then
+                ui.info("    [mail] " + cred.username + " / " + cred.password)
+            else if cred.type == "system" then
+                ui.info("    [root] " + cred.password)
+            else if cred.type == "bank" then
+                ui.info("    [bank] " + cred.username + " / " + cred.bank_number)
+            end if
+        end for
+    else
+        ui.dim("  No credentials harvested")
+    end if
+
+    if res.hasIndex("persons") and res.persons.len > 0 then
+        ui.info("  Users found: " + str(res.persons.len))
+        for p in res.persons
+            line = "    " + p.username
+            if p.hasIndex("email") then
+                line = line + " / " + p.email
+            end if
+            ui.print(line)
+        end for
+    end if
+
+    ui.separator()
+end function
+
+// ── shinylibs ─────────────────────────────────────────────────────────────
+_cmd = new Command
+_cmd.name = "shinylibs"
+_cmd.description = "Manage shiny library collection. Subcommands: list, get, scan, resweep, put"
+_cmd.parameters = [
+    OptionsParameter.New({"name": "subcommand", "required": false, "options": {
+        "list": "list", "get": "get", "scan": "scan",
+        "resweep": "resweep", "put": "put"
+    }}),
+    StringParameter.New({"name": "mode", "required": false})
+]
+_cmd.permissions = {}
+_cmd.permissions.object = "shell"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    shinyMgr       = mediator.getExtension("shinyLibsManager")
+    dbManager      = mediator.getExtension("databaseManager")
+    sub            = params.subcommand
+
+    if sub == null or sub == "list" then
+        shinyMgr.list()
+        return
+    end if
+
+    if sub == "get" then
+        currentSess  = sessionManager.currentSession
+        pivotSess    = sessionManager.pivotSession
+        if currentSess == null then
+            return Error.New("No active session", "NO_SESSION")
+        end if
+        shinyMgr.collectStaged(currentSess.handler, pivotSess.handler)
+        dbManager.save()
+        return
+    end if
+
+    if sub == "scan" then
+        currentSess = sessionManager.currentSession
+        if currentSess == null then
+            return Error.New("No active session", "NO_SESSION")
+        end if
+        libMgr = mediator.getExtension("libManager")
+        meta   = libMgr.getMetaxploit()
+        if meta == null or meta isa Error then
+            return Error.New("metaxploit not available", "NO_META")
+        end if
+        shinyMgr.scan(currentSess.handler)
+        return
+    end if
+
+    if sub == "resweep" then
+        pivotSess = sessionManager.pivotSession
+        result = shinyMgr.resweep(pivotSess.handler)
+        if result isa Error then
+            return result
+        end if
+        dbManager.save()
+        return
+    end if
+
+    if sub == "put" then
+        mode = params.mode
+        if mode == null then
+            ui.info("Usage: shinylibs put harden|vuln")
+            return
+        end if
+        currentSess = sessionManager.currentSession
+        pivotSess   = sessionManager.pivotSession
+        if currentSess == null then
+            return Error.New("No active session", "NO_SESSION")
+        end if
+        if currentSess == pivotSess then
+            return Error.New("Cannot put libs on Nest — use on a target session", "IS_NEST")
+        end if
+        result = shinyMgr.put(mode, currentSess.handler, pivotSess.handler)
+        if result isa Error then
+            return result
+        end if
+        return
+    end if
+end function
+commandManager.register(_cmd)
+
+// ── end of registerAllCommands ─────────────────────────────────────────────
+end function // registerAllCommands

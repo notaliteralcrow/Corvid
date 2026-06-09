@@ -1,0 +1,1245 @@
+// ============================================================
+// CORVID 2.0 | commands_bounces
+// Bounce network management command. Extracted from commands_4.txt
+// to keep that file under the 160k character per-file limit.
+// Subcommands: update map chain verify wipe harden reset remove
+//              add revive restore
+// ============================================================
+
+// --- bounces ---
+_cmd = new Command
+_cmd.name = "bounces"
+_cmd.description = "Bounce network management. Subcommands: update map chain verify wipe harden reset remove add revive restore"
+_cmd.parameters = [OptionsParameter.New({"name": "subcommand", "required": true, "options": {"update": "update", "map": "map", "chain": "chain", "verify": "verify", "wipe": "wipe", "harden": "harden", "reset": "reset", "remove": "remove", "add": "add", "revive": "revive", "restore": "restore"}}), StringParameter.New({"name": "subcommand2", "required": false, "default": ""})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+    dbManager      = mediator.getExtension("databaseManager")
+    bounceManager  = mediator.getExtension("bounceManager")
+    configManager  = mediator.getExtension("configManager")
+    attackManager  = mediator.getExtension("attackManager")
+    sub            = params.subcommand
+
+    // ── build ─────────────────────────────────────────────────────────────
+    if sub == "update" then
+        ui.separator()
+        ui.highlight("UPDATING BOUNCE NETWORK FROM OWNED TARGETS")
+        ui.separator()
+
+        // First clean out dead bounces before repopulating.
+        // Track IPs removed THIS run so the removed_bounce filter below
+        // doesn't block them from being re-added in the same invocation.
+        allBouncesPreClean = bounceManager.listBounces()
+        deadRemoved = 0
+        justRemovedIps = []
+        for b in allBouncesPreClean
+            bHealth = bounceManager.getHealth(b)
+            if bHealth == "dead" or bHealth == "dead_port" or bHealth == "dead_creds" then
+                bIp = ""
+                if b.hasIndex("public_ip") then
+                    bIp = b.public_ip
+                end if
+                if bIp.len > 0 then
+                    bounceManager.removeBounce(bIp)
+                    justRemovedIps.push(bIp)
+                    ui.dim("  Removed dead: " + bIp)
+                    deadRemoved = deadRemoved + 1
+                end if
+            end if
+        end for
+        if deadRemoved > 0 then
+            ui.print("")
+        end if
+
+        allTargets = dbManager.allTargets()
+        added = 0
+        skipped = 0
+        noSsh = 0
+
+        for target in allTargets
+            tStatus = ""
+            if target.hasIndex("status") then
+                tStatus = target.status
+            end if
+            // Include both "owned" targets and existing "bounce" targets
+            if tStatus != "owned" and tStatus != "bounce" then
+                continue
+            end if
+            // Skip targets that were explicitly removed from bounce network
+            pubIp = ""
+            if target.hasIndex("public_ip") then
+                pubIp = target.public_ip
+            end if
+            if pubIp.len == 0 then
+                continue
+            end if
+
+            // If we just removed this IP as dead earlier in THIS update,
+            // strip the removed_bounce marker so we can re-add it cleanly.
+            wasJustRemoved = false
+            for jr in justRemovedIps
+                if jr == pubIp then
+                    wasJustRemoved = true
+                end if
+            end for
+            if wasJustRemoved and target.hasIndex("notes") and target.notes.indexOf("removed_bounce") != null then
+                cleanedNotes = target.notes.replace("removed_bounce", "").trim
+                while cleanedNotes.indexOf("  ") != null
+                    cleanedNotes = cleanedNotes.replace("  ", " ")
+                end while
+                target.notes = cleanedNotes.trim
+                dbManager.targetDb.db.set(target.id, target)
+                dbManager.targetDb.db.dirty = true
+            end if
+
+            tNotes = ""
+            if target.hasIndex("notes") then
+                tNotes = target.notes
+            end if
+            if tNotes.indexOf("removed_bounce") != null then
+                ui.dim("  " + pubIp + " - previously removed (use: bounces reset " + pubIp + " to re-add)")
+                skipped = skipped + 1
+                continue
+            end if
+
+            // Need SSH credentials using helper
+            systemCreds = dbManager.findAnySystemCredentials(pubIp)
+            rootUser = systemCreds.username
+            rootPass = systemCreds.password
+
+            if rootPass.len == 0 then
+                ui.warning("  " + pubIp + " - no system credentials found, skipping")
+                noSsh = noSsh + 1
+                continue
+            end if
+
+            // Check if already in bounce list - verify record actually exists.
+            // Don't trust tStatus alone: if the bounce record is missing/malformed
+            // we want to fall through and re-add it.
+            existingBounce = bounceManager.findBounce(pubIp)
+            if existingBounce != null then
+                ui.info("  " + pubIp + " - already in bounce list, skipping")
+                skipped = skipped + 1
+                continue
+            end if
+            // Status says bounce but no record found - log it and proceed to re-add
+            if tStatus == "bounce" then
+                ui.dim("  " + pubIp + " - status=bounce but no record, re-registering")
+            end if
+
+            // Add to bounce list
+            lanIp = ""
+            if target.hasIndex("lan_ip") then
+                lanIp = target.lan_ip
+            end if
+            nestIp = sessionManager.sessions[0].data.ip.public
+            bounceManager.addBounce(pubIp, lanIp, 22, rootUser, rootPass, "owned", nestIp)
+            ui.success("  " + pubIp + " - added to bounce network")
+            added = added + 1
+        end for
+
+        ui.print("")
+        ui.info("Added: " + str(added) + "  Skipped (existing): " + str(skipped) + "  No creds: " + str(noSsh) + "  Dead removed: " + str(deadRemoved))
+        ui.separator()
+
+    // ── map ───────────────────────────────────────────────────────────────
+    else if sub == "map" then
+        ui.separator()
+        ui.highlight("BOUNCE NETWORK MAP")
+        ui.separator()
+
+        bounces = bounceManager.listBounces()
+        if bounces.len == 0 then
+            ui.warning("No bounce points registered. Run: bounces update")
+            return
+        end if
+
+        nestIp = sessionManager.sessions[0].data.ip.public
+        ui.print("")
+        ui.print(ui.mediator.getExtension("themeManager").highlight("  YOUR NEST (" + nestIp + ")"))
+        ui.print("      |")
+
+        for i in range(0, bounces.len - 1)
+            b = bounces[i]
+            bIp = ""
+            if b.hasIndex("public_ip") then
+                bIp = b.public_ip
+            end if
+            // Health is stored in notes field, status is always "bounce"
+            bHealth = "unknown"
+            if b.hasIndex("notes") then
+                for notePart in b.notes.split(" ")
+                    if notePart.indexOf("health:") == 0 then
+                        bHealth = notePart[7:]
+                    end if
+                end for
+            end if
+            bType = "owned"
+            if b.hasIndex("notes") and b.notes.indexOf("owned") != null then
+                bType = "owned"
+            end if
+
+            isLast = i == bounces.len - 1
+            branch = "      ├── "
+            if isLast then
+                branch = "      └── "
+            end if
+
+            theme = ui.mediator.getExtension("themeManager")
+            line = branch + "[" + str(i+1) + "] " + bIp + "  " + bType
+            if bHealth == "healthy" then
+                ui.print(line + "  " + theme.success("✓ healthy"))
+            else if bHealth == "dead_port" then
+                ui.print(line + "  " + theme.error("✗ dead (port gone)"))
+            else if bHealth == "dead_creds" then
+                ui.print(line + "  " + theme.warning("✗ dead (creds failed)"))
+            else if bHealth == "dead" then
+                ui.print(line + "  " + theme.warning("✗ dead"))
+            else
+                ui.print(line + "  " + theme.secondary("? unverified"))
+            end if
+        end for
+        ui.print("")
+        ui.separator()
+
+    // ── chain ─────────────────────────────────────────────────────────────
+    else if sub == "chain" then
+        bounces = bounceManager.listBounces()
+        if bounces.len == 0 then
+            return Error.New("No bounce points registered. Run: bounces update", "NO_BOUNCES")
+        end if
+
+        // Parse optional "max" argument - use all available bounces
+        useMax = false
+        targetHops = 5
+        if params.hasIndex("subcommand2") then
+            if params.subcommand2 == "max" then
+                useMax = true
+            else
+                parsed = params.subcommand2.val
+                if parsed > 0 then
+                    targetHops = parsed
+                end if
+            end if
+        end if
+
+        // Build pool: filter dead and deduplicate by IP
+        pool = []
+        seenPoolIps = []
+        for b in bounces
+            bHealth = "unknown"
+            if b.hasIndex("notes") then
+                for np in b.notes.split(" ")
+                    if np.indexOf("health:") == 0 then
+                        bHealth = np[7:]
+                    end if
+                end for
+            end if
+            if bHealth == "dead" or bHealth == "dead_port" or bHealth == "dead_creds" then
+                continue
+            end if
+            bIp = ""
+            if b.hasIndex("public_ip") then
+                bIp = b.public_ip
+            end if
+            if bIp.len == 0 then
+                continue
+            end if
+            alreadySeen = false
+            for sIp in seenPoolIps
+                if sIp == bIp then
+                    alreadySeen = true
+                end if
+            end for
+            if not alreadySeen then
+                pool.push(b)
+                seenPoolIps.push(bIp)
+            end if
+        end for
+
+        if pool.len == 0 then
+            return Error.New("No healthy bounce points available. Run: bounces verify", "NO_HEALTHY")
+        end if
+
+        if useMax then
+            targetHops = pool.len
+        end if
+
+        ui.separator()
+        ui.highlight("BOUNCE CHAIN")
+        ui.separator()
+        ui.print("")
+        ui.info("Target hops: " + str(targetHops) + "  Available pool: " + str(pool.len))
+        ui.print("")
+
+        // Check AdminMonitor running locally
+        localShell = sessionManager.sessions[0].handler.shell.shell
+        psOutput = localShell.host_computer.show_procs
+        monitorRunning = false
+        if psOutput != null and typeof(psOutput) == "string" then
+            if psOutput.indexOf("AdminMonitor") != null then
+                monitorRunning = true
+            end if
+        end if
+        if not monitorRunning then
+            ui.warning("AdminMonitor is not running.")
+            monAnswer = user_input("  Launch AdminMonitor now? (yes/no): ")
+            if monAnswer.trim == "yes" or monAnswer.trim == "y" then
+                sessionManager.sessions[0].handler.shell.launch("/bin/AdminMonitor.exe", "")
+                ui.success("AdminMonitor launched.")
+            end if
+        end if
+
+        // Load metaxploit for admin check if needed in future
+        chainMeta = include_lib("/lib/metaxploit.so")
+
+        // Progressive random chain - pick one hop at a time from remaining pool
+        hopsCompleted = 0
+        attempted = []
+        chainRecord = []
+        seed = floor(time * 1337)
+
+        while hopsCompleted < targetHops and pool.len > 0
+
+            // Pick a random bounce from remaining pool
+            seed = (seed * 7 + 13) % 99999
+            idx = seed % pool.len
+            b = pool[idx]
+            pool.remove(idx)
+
+            bIp   = ""
+            bPort = 22
+            if b.hasIndex("public_ip") then
+                bIp = b.public_ip
+            end if
+            if bIp.len == 0 then
+                continue
+            end if
+            attempted.push(bIp)
+
+            ui.info("[" + str(hopsCompleted + 1) + "/" + str(targetHops) + "] Trying: " + bIp + "...")
+
+            // Credential lookup - try current password then native_pass
+            bUser = "root"
+            bPass = ""
+            bNativePass = ""
+            bCreds = dbManager.findCredentialsByIp(bIp)
+            for bc in bCreds
+                if bc.username == "root" and bc.password.len > 0 then
+                    bPass = bc.password
+                end if
+                if bc.username == "root" and bc.hasIndex("native_pass") and bc.native_pass.len > 0 then
+                    bNativePass = bc.native_pass
+                end if
+            end for
+            // Use native_pass if current is empty
+            if bPass.len == 0 and bNativePass.len > 0 then
+                bPass = bNativePass
+            end if
+
+            if bPass.len == 0 then
+                ui.warning("  No root credentials - skipping " + bIp)
+                continue
+            end if
+
+            // Connect
+            currentHandler = sessionManager.currentSession.handler
+            sshResult = currentHandler.shell.shell.connect_service(bIp, bPort, bUser, bPass, "ssh")
+            if typeof(sshResult) != "shell" then
+                ui.warning("  Connection failed on " + bIp + " - skipping")
+                bounceManager.setStatus(bIp, "dead")
+                continue
+            end if
+
+            newSession = sessionManager.addSession(sshResult, "bounce@" + bIp)
+            if newSession isa Error then
+                ui.warning("  Session error on " + bIp + ": " + newSession.message)
+                continue
+            end if
+            sessionManager.setCurrentSession(newSession)
+            hopsCompleted = hopsCompleted + 1
+            ui.success("  Hopped: " + bIp + " (" + str(hopsCompleted) + "/" + str(targetHops) + ")")
+            // Record hop for chain persistence
+            hopRecord = {}
+            hopRecord.ip   = bIp
+            hopRecord.port = bPort
+            hopRecord.user = bUser
+            hopRecord.pass = bPass
+            chainRecord.push(hopRecord)
+
+            // Open LogViewer on this hop so you can immediately clear the log manually
+            lvPath = ""
+            lvFile = newSession.handler.getFile("/usr/bin/LogViewer.exe")
+            if not (lvFile isa Error) then
+                lvPath = "/usr/bin/LogViewer.exe"
+            end if
+            if lvPath.len == 0 then
+                lvFile = newSession.handler.getFile("/bin/LogViewer.exe")
+                if not (lvFile isa Error) then
+                    lvPath = "/bin/LogViewer.exe"
+                end if
+            end if
+            if lvPath.len > 0 then
+                newSession.handler.shell.shell.launch(lvPath)
+                wait(2)
+                ui.info("  LogViewer opened on " + bIp + " - clear the log now")
+            else
+                ui.dim("  LogViewer.exe not found on " + bIp)
+            end if
+
+
+
+        end while
+
+        ui.print("")
+        if hopsCompleted == 0 then
+            ui.warning("No bounces could be established. Try: bounces verify")
+        else
+            // Save chain to config for restore
+            // Format: ip|port|user|pass;ip|port|user|pass;...
+            // Pipe and semicolon safe - Grey Hack passwords are alphanumeric
+            chainStr = ""
+            for cr in chainRecord
+                if chainStr.len > 0 then
+                    chainStr = chainStr + ";"
+                end if
+                chainStr = chainStr + cr.ip + "|" + str(cr.port) + "|" + cr.user + "|" + cr.pass
+            end for
+            configManager.set("lastChain", chainStr)
+            configManager.set("lastChainHops", str(hopsCompleted))
+            dbManager.save()
+            if hopsCompleted < targetHops then
+                ui.warning("Completed " + str(hopsCompleted) + "/" + str(targetHops) + " hops (pool exhausted)")
+            else
+                ui.success("Chain complete: " + str(hopsCompleted) + " hops")
+            end if
+            ui.info("Now on: " + sessionManager.currentSession.label)
+
+            // Open LogViewer on Nest (session 0) so you can clear its log too
+            pivotHandler = sessionManager.pivotSession.handler
+            nestLvPath = ""
+            nestLv = pivotHandler.getFile("/usr/bin/LogViewer.exe")
+            if not (nestLv isa Error) then
+                nestLvPath = "/usr/bin/LogViewer.exe"
+            end if
+            if nestLvPath.len == 0 then
+                nestLv = pivotHandler.getFile("/bin/LogViewer.exe")
+                if not (nestLv isa Error) then
+                    nestLvPath = "/bin/LogViewer.exe"
+                end if
+            end if
+            if nestLvPath.len > 0 then
+                pivotHandler.shell.shell.launch(nestLvPath)
+                ui.info("LogViewer opened on Nest - clear its log now")
+            end if
+
+            ui.info("Run attack from here. Run leave to return to Nest. Run leave wipe to also attempt log cleanup.")
+            ui.info("Chain saved - use: bounces restore  to rebuild if session interrupted.")
+        end if
+        ui.separator()
+
+
+    // ── verify ────────────────────────────────────────────────────────────
+    else if sub == "verify" then
+        ui.separator()
+        ui.highlight("VERIFYING BOUNCE NETWORK")
+        ui.separator()
+
+        bounces = bounceManager.listBounces()
+        if bounces.len == 0 then
+            ui.warning("No bounce points registered.")
+            return
+        end if
+
+        healthy = 0
+        dead    = 0
+
+        for b in bounces
+            bIp  = ""
+            bPort = 22
+            if b.hasIndex("public_ip") then
+                bIp = b.public_ip
+            end if
+            if bIp.len == 0 then
+                continue
+            end if
+
+            ui.info("Checking " + bIp + "...")
+
+            // Port is up - confirm with credentials from DB
+            bPass = ""
+            bNativePass = ""
+            bCreds = dbManager.findCredentialsByIp(bIp)
+            for bc in bCreds
+                if bc.username == "root" and bc.password.len > 0 then
+                    bPass = bc.password
+                end if
+                if bc.username == "root" and bc.hasIndex("native_pass") and bc.native_pass.len > 0 then
+                    bNativePass = bc.native_pass
+                end if
+            end for
+
+            if bPass.len == 0 and bNativePass.len == 0 then
+                bounceManager.setStatus(bIp, "dead_creds")
+                ui.warning("  " + bIp + " ✗ dead - port open but no root credentials in DB")
+                dead = dead + 1
+                continue
+            end if
+
+            // Full SSH check - try current password then native_pass
+            currentHandler = sessionManager.currentSession.handler
+            rawShellV = currentHandler.shell.shell
+            testResult = null
+            usedPass = bPass
+            if bPass.len > 0 then
+                testResult = rawShellV.connect_service(bIp, bPort, "root", bPass, "ssh")
+            end if
+            if typeof(testResult) != "shell" and bNativePass.len > 0 and bNativePass != bPass then
+                ui.dim("  Trying native password...")
+                testResult = rawShellV.connect_service(bIp, bPort, "root", bNativePass, "ssh")
+                usedPass = bNativePass
+            end if
+
+            if typeof(testResult) == "shell" then
+                bounceManager.setStatus(bIp, "healthy")
+                ui.success("  " + bIp + " ✓ healthy")
+                healthy = healthy + 1
+                // If native_pass worked, update stored password in DB
+                if usedPass == bNativePass and bNativePass != bPass then
+                    ui.info("  Native password worked - updating DB")
+                    credFix = {} ; credFix.type = "system" ; credFix.username = "root"
+                    credFix.password = bNativePass ; credFix.public_ip = bIp
+                    credFix.source = "native"
+                    dbManager.upsertCredential(credFix)
+                    dbManager.save()
+                end if
+            else
+                bounceManager.setStatus(bIp, "dead_creds")
+                ui.warning("  " + bIp + " ✗ dead - credentials rejected")
+                dead = dead + 1
+
+                // ── Auto-reattack dead_creds bounce ──────────────────────
+                // Port is reachable but creds failed - try to re-exploit
+                // First check if admin is active (skip if so)
+                adminActive = false
+                metaVerify = include_lib("/lib/metaxploit.so")
+                if metaVerify != null then
+                    adminNet = metaVerify.net_use(bIp, bPort)
+                    if adminNet != null then
+                        if adminNet.is_root_active_user == 1 then
+                            adminActive = true
+                            ui.warning("  " + bIp + " - admin active, skipping reattack")
+                        end if
+                    end if
+                end if
+
+                if not adminActive then
+                    ui.info("  " + bIp + " - attempting auto-reattack...")
+                    // Look up stored exploit data for this bounce
+                    bTargets = dbManager.findTarget(bIp)
+                    reattackSucceeded = false
+                    for bTgt in bTargets
+                        if reattackSucceeded then
+                            break
+                        end if
+                        if not bTgt.hasIndex("exploit_db") then
+                            continue
+                        end if
+                        for bLibKey in bTgt.exploit_db.indexes
+                            if reattackSucceeded then
+                                break
+                            end if
+                            for bEx in bTgt.exploit_db[bLibKey]
+                                if reattackSucceeded then
+                                    break
+                                end if
+                                // Find port for this exploit
+                                bExPort = 0
+                                if bTgt.hasIndex("ports") then
+                                    for bPr in bTgt.ports
+                                        lm = bPr.service + "_" + bPr.version
+                                        if bLibKey.indexOf(lm) != null then
+                                            bExPort = bPr.port
+                                        end if
+                                    end for
+                                end if
+                                if bExPort == 0 then
+                                    continue
+                                end if
+
+                                // Try the overflow
+                                bNet = metaVerify.net_use(bIp, bExPort)
+                                if not bNet then
+                                    continue
+                                end if
+                                bLib = bNet.dump_lib
+                                if not bLib then
+                                    continue
+                                end if
+
+                                // Generate fresh password for password-change exploits
+                                genPass = genRandomPass(12, bIp)
+
+                                bResult = bLib.overflow(bEx.address, bEx.exploit, genPass)
+                                if bResult == null or typeof(bResult) == "string" then
+                                    continue
+                                end if
+
+                                if typeof(bResult) == "shell" then
+                                    // Got a shell - update credentials and mark healthy
+                                    newPriv = ""
+                                    bComp = bResult.host_computer
+                                    if bComp != null then
+                                        // Change root password to our generated one
+                                        bComp.change_password("root", genPass)
+                                        newPriv = "root"
+                                    end if
+                                    // Save new credential
+                                    bCredNew = {} ; bCredNew.type = "system" ; bCredNew.username = "root"
+                                    bCredNew.password = genPass ; bCredNew.public_ip = bIp
+                                    bCredNew.source = "exploit_generated"
+                                    dbManager.upsertCredential(bCredNew)
+                                    dbManager.save()
+                                    bounceManager.setStatus(bIp, "healthy")
+                                    ui.success("  " + bIp + " - reattack succeeded! Bounce restored.")
+                                    dead = dead - 1
+                                    healthy = healthy + 1
+                                    reattackSucceeded = true
+
+                                else if bEx.hasIndex("privilege") and bEx.privilege.len > 0 and bEx.privilege != "none" then
+                                    // Password-change exploit - try SSH with new password
+                                    bSshTry = rawShellV.connect_service(bIp, 22, bEx.privilege, genPass, "ssh")
+                                    if typeof(bSshTry) == "shell" then
+                                        bCredNew = {} ; bCredNew.type = "system" ; bCredNew.username = "root"
+                                        bCredNew.password = genPass ; bCredNew.public_ip = bIp
+                                        bCredNew.source = "exploit_generated"
+                                        dbManager.upsertCredential(bCredNew)
+                                        dbManager.save()
+                                        bounceManager.setStatus(bIp, "healthy")
+                                        ui.success("  " + bIp + " - reattack via password-change succeeded!")
+                                        dead = dead - 1
+                                        healthy = healthy + 1
+                                        reattackSucceeded = true
+                                    end if
+                                end if
+                            end for
+                        end for
+                    end for
+
+                    if not reattackSucceeded then
+                        ui.dim("  " + bIp + " - reattack failed, bounce remains dead")
+                    end if
+                end if
+                // ── End auto-reattack ─────────────────────────────────────
+            end if
+        end for
+
+        ui.print("")
+        ui.info("Healthy: " + str(healthy) + "  Dead: " + str(dead))
+        ui.separator()
+
+    // ── wipe ──────────────────────────────────────────────────────────────
+    else if sub == "wipe" then
+        ui.separator()
+        ui.highlight("WIPING BOUNCE LOGS")
+        ui.separator()
+
+        bounces = bounceManager.listBounces()
+        if bounces.len == 0 then
+            ui.warning("No bounce points registered.")
+            return
+        end if
+
+        // Originate from Nest (sessions[0]) for consistency with `harden`.
+        // The bounce machines are reached directly from Nest - no chain hop required.
+        wipeHandler = sessionManager.sessions[0].handler
+
+        for b in bounces
+            bIp  = ""
+            bPort = 22
+            if b.hasIndex("public_ip") then
+                bIp = b.public_ip
+            end if
+            if bIp.len == 0 then
+                continue
+            end if
+
+            // Look up root credentials from credential DB
+            bUser = "root"
+            bPass = ""
+            bCreds2 = dbManager.findCredentialsByIp(bIp)
+            for bc2 in bCreds2
+                if bc2.username == "root" and bc2.password.len > 0 then
+                    bPass = bc2.password
+                end if
+            end for
+            if bPass.len == 0 then
+                ui.warning("  " + bIp + " - no root credentials")
+                continue
+            end if
+
+            sshResult = wipeHandler.shell.shell.connect_service(bIp, bPort, bUser, bPass, "ssh")
+            if typeof(sshResult) != "shell" then
+                ui.warning("  " + bIp + " - could not connect")
+                continue
+            end if
+            // Corrupt log using move trick - more effective than set_content
+            comp = sshResult.host_computer
+            if comp != null then
+                comp.touch("/var", "t")
+                emptyFile = comp.File("/var/t")
+                if emptyFile != null then
+                    moveResult = emptyFile.move("/var", "system.log")
+                    if moveResult == 1 then
+                        ui.success("  " + bIp + " - log wiped")
+                    else
+                        emptyFile.delete()
+                        ui.warning("  " + bIp + " - log wipe failed")
+                    end if
+                else
+                    ui.warning("  " + bIp + " - could not create temp file")
+                end if
+            else
+                ui.warning("  " + bIp + " - could not access computer")
+            end if
+        end for
+        ui.separator()
+
+    // ── harden ───────────────────────────────────────────────────────────
+    else if sub == "harden" then
+        ui.separator()
+        ui.highlight("HARDENING BOUNCE NETWORK")
+        ui.separator()
+
+        bounces = bounceManager.listBounces()
+        if bounces.len == 0 then
+            ui.warning("No bounce points registered. Run: bounces update")
+            return
+        end if
+
+        metaHarden = include_lib("/lib/metaxploit.so")
+        upgraded = 0
+        current  = 0
+        failed   = 0
+
+        for b in bounces
+            bIp  = ""
+            bPort = 22
+            if b.hasIndex("public_ip") then
+                bIp = b.public_ip
+            end if
+            if bIp.len == 0 then
+                continue
+            end if
+
+            // Skip dead bounces
+            bHealth = "unknown"
+            if b.hasIndex("notes") then
+                for np in b.notes.split(" ")
+                    if np.indexOf("health:") == 0 then
+                        bHealth = np[7:]
+                    end if
+                end for
+            end if
+            if bHealth == "dead" or bHealth == "dead_port" or bHealth == "dead_creds" then
+                ui.dim("  " + bIp + " - dead (" + bHealth + "), skipping")
+                continue
+            end if
+
+            // Pre-flight admin check
+            preNet = null
+            if metaHarden != null then
+                preNet = metaHarden.net_use(bIp, bPort)
+            end if
+            if not (preNet isa Error) and preNet != null then
+                if preNet.is_root_active_user == 1 then
+                    ui.warning("  " + bIp + " - admin active, skipping")
+                    continue
+                end if
+            end if
+
+            // Look up root credentials
+            bUser = "root"
+            bPass = ""
+            bCreds = dbManager.findCredentialsByIp(bIp)
+            for bc in bCreds
+                if bc.username == "root" and bc.password.len > 0 then
+                    bPass = bc.password
+                end if
+            end for
+            if bPass.len == 0 then
+                ui.warning("  " + bIp + " - no credentials, skipping")
+                failed = failed + 1
+                continue
+            end if
+
+            // Connect via SSH
+            hardenFromHandler = sessionManager.sessions[0].handler
+            sshH = hardenFromHandler.shell.shell.connect_service(bIp, bPort, bUser, bPass, "ssh")
+            if typeof(sshH) != "shell" then
+                ui.warning("  " + bIp + " - could not connect")
+                failed = failed + 1
+                continue
+            end if
+
+            // Check and upgrade libssh.so
+            ui.info("  Checking " + bIp + "...")
+            apt = include_lib("/lib/aptclient.so")
+            if apt == null then
+                ui.warning("  " + bIp + " - aptclient.so not available")
+                failed = failed + 1
+                continue
+            end if
+
+            upgradeCheck = apt.check_upgrade("/lib/libssh.so")
+            if upgradeCheck == 1 then
+                apt.install("libssh.so", "/lib")
+                ui.success("  " + bIp + " - libssh.so upgraded ✓")
+                upgraded = upgraded + 1
+            else if upgradeCheck == 0 then
+                ui.dim("  " + bIp + " - libssh.so already current")
+                current = current + 1
+            else
+                ui.warning("  " + bIp + " - upgrade check failed: " + str(upgradeCheck))
+                failed = failed + 1
+            end if
+
+            // Apply chmod -R o-rwx / for stealth hardening
+            hardenComp = sshH.host_computer
+            if hardenComp != null then
+                rootFolder = hardenComp.File("/")
+                if not (rootFolder isa Error) then
+                    rootFolder.chmod("o-rwx", true)
+                    ui.success("  " + bIp + " - permissions locked ✓")
+                end if
+            end if
+
+            // Change root password and update credential DB
+            newPass = genRandomPass(12, bIp)
+
+            hardenComp2 = sshH.host_computer
+            if hardenComp2 != null then
+                pwResult = hardenComp2.change_password("root", newPass)
+                if typeof(pwResult) != "string" or pwResult.len == 0 then
+                    ui.success("  " + bIp + " - root password changed ✓")
+                    // Update credential DB with new password
+                    credUpdate = {}
+                    credUpdate.type      = "system"
+                    credUpdate.username  = "root"
+                    credUpdate.password  = newPass
+                    credUpdate.public_ip = bIp
+                    credUpdate.source    = "hardened"
+                    dbManager.upsertCredential(credUpdate)
+                    dbManager.save()
+                else
+                    ui.warning("  " + bIp + " - password change failed: " + pwResult)
+                end if
+
+                // Wipe log after hardening
+                hardenLog = hardenComp2.File("/var/system.log")
+                if not (hardenLog isa Error) then
+                    hardenLog.set_content("")
+                end if
+            end if
+        end for
+
+        ui.print("")
+        ui.info("Upgraded: " + str(upgraded) + "  Already current: " + str(current) + "  Failed: " + str(failed))
+        ui.separator()
+
+    // ── clean ────────────────────────────────────────────────────────────
+    else if sub == "reset" then
+        resetIp = ""
+        if params.hasIndex("ip") then
+            resetIp = params.ip
+        end if
+        if resetIp.len == 0 and params.hasIndex("publicip") then
+            resetIp = params.publicip
+        end if
+        if resetIp.len == 0 then
+            ui.warning("Usage: bounces reset <ip>  - clears removed_bounce marker so build can re-add it")
+            return
+        end if
+
+        targets = dbManager.findTarget(resetIp)
+        if targets.len == 0 then
+            ui.warning("No target found for: " + resetIp)
+            return
+        end if
+
+        cleared = false
+        for t in targets
+            if t.hasIndex("notes") and t.notes.indexOf("removed_bounce") != null then
+                newNotes = t.notes.replace("removed_bounce", "").trim
+                // Clean up double spaces
+                while newNotes.indexOf("  ") != null
+                    newNotes = newNotes.replace("  ", " ")
+                end while
+                t.notes = newNotes.trim
+                dbManager.upsertTarget(t)
+                cleared = true
+            end if
+        end for
+
+        if cleared then
+            dbManager.save()
+            ui.success("Reset " + resetIp + " - run 'bounces update' to re-add to bounce network")
+        else
+            ui.info(resetIp + " has no removed_bounce marker - run 'bounces update' directly")
+        end if
+
+    // ── add ───────────────────────────────────────────────────────────────
+    else if sub == "add" then
+        ui.separator()
+        ui.highlight("ADD BOUNCE POINT")
+        ui.separator()
+        addIp   = user_input("  Public IP: ").trim
+        addPass = user_input("  Root password: ").trim
+        addLan  = user_input("  LAN IP (enter to skip): ").trim
+        addPort = 22
+        addPortStr = user_input("  SSH port (enter for 22): ").trim
+        if addPortStr.len > 0 and addPortStr.val > 0 then
+            addPort = addPortStr.val
+        end if
+
+        if not is_valid_ip(addIp) then
+            ui.warning("Invalid IP: " + addIp)
+            return
+        end if
+        if addPass.len == 0 then
+            ui.warning("Password required")
+            return
+        end if
+
+        // Verify connection before adding
+        ui.info("Verifying connection to " + addIp + "...")
+        pivotShell = sessionManager.sessions[0].handler.shell.shell
+        testConn = pivotShell.connect_service(addIp, addPort, "root", addPass, "ssh")
+        if typeof(testConn) != "shell" then
+            ui.warning("Could not connect: " + str(testConn))
+            addAnyway = user_input("  Add anyway? (yes/no): ").trim
+            if addAnyway != "yes" and addAnyway != "y" then
+                return
+            end if
+        else
+            ui.success("Connection verified")
+        end if
+
+        nestIp = sessionManager.sessions[0].data.ip.public
+        bounceManager.addBounce(addIp, addLan, addPort, "root", addPass, "owned", nestIp)
+        bounceManager.setStatus(addIp, "healthy")
+        ui.success("Bounce point added manually: " + addIp)
+        ui.separator()
+
+    // ── restore ────────────────────────────────────────────────────────────
+    else if sub == "restore" then
+        ui.separator()
+        ui.highlight("BOUNCE CHAIN RESTORE")
+        ui.separator()
+
+        savedChain = configManager.get("lastChain")
+        if savedChain isa Error then
+            ui.warning("No saved chain found (key missing). Run: bounces chain  first.")
+            ui.dim("Error: " + savedChain.message)
+            return
+        end if
+        if savedChain.len == 0 then
+            ui.warning("No saved chain found (empty). Run: bounces chain  first.")
+            return
+        end if
+        savedHops = configManager.get("lastChainHops")
+        if savedHops isa Error then
+            savedHops = "?"
+        end if
+
+        ui.info("Restoring " + savedHops + "-hop chain...")
+        ui.print("")
+
+        // Parse saved chain: ip|port|user|pass;ip|port|user|pass;...
+        chainHops = []
+        entries = savedChain.split(";")
+        for entry in entries
+            t = entry.trim()
+            if t.len == 0 then
+                continue
+            end if
+            parts = t.split("|")
+            if parts.len >= 4 then
+                hop = {}
+                hop.ip   = parts[0]
+                hop.port = parts[1].val
+                hop.user = parts[2]
+                hop.pass = parts[3]
+                if hop.ip.len > 0 then
+                    chainHops.push(hop)
+                end if
+            end if
+        end for
+
+        if chainHops.len == 0 then
+            ui.warning("Could not parse saved chain. Run: bounces chain to rebuild.")
+            return
+        end if
+
+        ui.info("Rebuilding " + str(chainHops.len) + "-hop chain:")
+        for ch in chainHops
+            ui.dim("  " + ch.ip + ":" + str(ch.port))
+        end for
+        ui.print("")
+
+        hopsRestored = 0
+        for hop in chainHops
+            bIp2   = hop.ip
+            bPort2 = hop.port
+            bUser2 = hop.user
+            bPass2 = hop.pass
+
+                        ui.info("[" + str(hopsRestored + 1) + "/" + str(chainHops.len) + "] Restoring: " + bIp2 + "...")
+
+            currentHandler2 = sessionManager.currentSession.handler
+            sshResult2 = currentHandler2.shell.shell.connect_service(bIp2, bPort2, bUser2, bPass2, "ssh")
+            if typeof(sshResult2) != "shell" then
+                ui.warning("  Could not reconnect to " + bIp2 + " - chain broken at hop " + str(hopsRestored + 1))
+                ui.info("  Try: bounces revive  to revive dead bounces then restore again")
+                break
+            end if
+
+            newSession2 = sessionManager.addSession(sshResult2, "bounce@" + bIp2)
+            if newSession2 isa Error then
+                ui.warning("  Session error on " + bIp2 + ": " + newSession2.message)
+                break
+            end if
+            sessionManager.setCurrentSession(newSession2)
+            hopsRestored = hopsRestored + 1
+            ui.success("  Restored: " + bIp2 + " (" + str(hopsRestored) + "/" + str(chainHops.len) + ")")
+
+            // Wipe log
+            bounceComp2 = sshResult2.host_computer
+            if bounceComp2 != null then
+                logFile2 = bounceComp2.File("/var/system.log")
+                if logFile2 != null and not (logFile2 isa Error) then
+                    logFile2.set_content("")
+                    ui.success("  Log wiped")
+                end if
+            end if
+        end for
+
+        ui.print("")
+        if hopsRestored == chainHops.len then
+            ui.success("Chain fully restored: " + str(hopsRestored) + " hops")
+        else
+            ui.warning("Partial restore: " + str(hopsRestored) + "/" + str(chainHops.len) + " hops")
+        end if
+        ui.info("Now on: " + sessionManager.currentSession.label)
+        ui.info("Run leave to return to Nest. Run leave wipe to also attempt log cleanup.")
+        ui.separator()
+
+    // ── sweep ─────────────────────────────────────────────────────────────
+    else if sub == "revive" then
+        ui.separator()
+        ui.highlight("BOUNCE REVIVE")
+        ui.separator()
+        ui.info("Checking dead bounces and ssh_default targets for reconnection...")
+        ui.print("")
+
+        meta = include_lib("/lib/metaxploit.so")
+        if meta == null then
+            meta = include_lib(current_path + "/metaxploit.so")
+        end if
+
+        revived  = 0
+        skipped  = 0
+        failed   = 0
+
+        // Build candidate list:
+        // 1. All dead bounce records
+        // 2. All owned/exploited targets with ssh_default and stored root creds
+        candidates = []
+        seenIps    = []
+
+        // Dead bounces, plus any bounce that hasn't been verified this session
+        // (notes don't carry a health: marker - state is genuinely unknown).
+        allBounces = bounceManager.listBounces()
+        for b in allBounces
+            bHealth = bounceManager.getHealth(b)
+            if bHealth == "dead" or bHealth == "dead_port" or bHealth == "dead_creds" or bHealth == "unknown" then
+                bIp = ""
+                if b.hasIndex("public_ip") then
+                    bIp = b.public_ip
+                end if
+                if bIp.len == 0 then
+                    continue
+                end if
+                alreadySeen = false
+                for s in seenIps
+                    if s == bIp then
+                        alreadySeen = true
+                    end if
+                end for
+                if not alreadySeen then
+                    entry = {} ; entry.ip = bIp ; entry.source = "dead_bounce"
+                    candidates.push(entry)
+                    seenIps.push(bIp)
+                end if
+            end if
+        end for
+
+        // Owned/exploited targets with ssh_default
+        allTargets = dbManager.allTargets()
+        for tgt in allTargets
+            tStatus = ""
+            if tgt.hasIndex("status") then
+                tStatus = tgt.status
+            end if
+            if tStatus != "owned" and tStatus != "exploited" then
+                continue
+            end if
+            if not tgt.hasIndex("ssh_default") or not tgt.ssh_default then
+                continue
+            end if
+            tIp = ""
+            if tgt.hasIndex("public_ip") then
+                tIp = tgt.public_ip
+            end if
+            if tIp.len == 0 then
+                continue
+            end if
+            alreadySeen = false
+            for s in seenIps
+                if s == tIp then
+                    alreadySeen = true
+                end if
+            end for
+            if not alreadySeen then
+                entry = {} ; entry.ip = tIp ; entry.source = "ssh_default"
+                candidates.push(entry)
+                seenIps.push(tIp)
+            end if
+        end for
+
+        if candidates.len == 0 then
+            ui.info("No dead bounces or ssh_default targets to sweep.")
+            return
+        end if
+
+        ui.info("Candidates: " + str(candidates.len))
+        ui.print("")
+
+        for candidate in candidates
+            cIp = candidate.ip
+            ui.info("Trying " + cIp + " (" + candidate.source + ")...")
+
+            // Quick port check first
+            if meta != null then
+                portCheck = meta.net_use(cIp, 22)
+                if not portCheck then
+                    ui.dim("  Port 22 unreachable - still down")
+                    failed = failed + 1
+                    continue
+                end if
+                // Skip if admin is active
+                if portCheck.is_root_active_user == 1 then
+                    ui.warning("  Admin active - skipping")
+                    skipped = skipped + 1
+                    continue
+                end if
+            end if
+
+            // Find root credentials
+            cPass     = ""
+            cNative   = ""
+            cCreds    = dbManager.findCredentialsByIp(cIp)
+            for cc in cCreds
+                if cc.username != "root" then
+                    continue
+                end if
+                if cc.password.len > 0 then
+                    cPass = cc.password
+                end if
+                if cc.hasIndex("native_pass") and cc.native_pass.len > 0 then
+                    cNative = cc.native_pass
+                end if
+            end for
+
+            if cPass.len == 0 and cNative.len == 0 then
+                ui.dim("  No root credentials in DB - skipping")
+                skipped = skipped + 1
+                continue
+            end if
+
+            // Try current password then native_pass
+            currentHandler = sessionManager.currentSession.handler
+            sshConn = null
+            if cPass.len > 0 then
+                sshConn = currentHandler.shell.shell.connect_service(cIp, 22, "root", cPass, "ssh")
+            end if
+            if typeof(sshConn) != "shell" and cNative.len > 0 and cNative != cPass then
+                ui.dim("  Trying native password...")
+                sshConn = currentHandler.shell.shell.connect_service(cIp, 22, "root", cNative, "ssh")
+                // If native worked, update DB to use native as primary
+                if typeof(sshConn) == "shell" then
+                    credFix = {}
+                    credFix.type = "system" ; credFix.username = "root"
+                    credFix.password = cNative ; credFix.public_ip = cIp
+                    credFix.source = "native"
+                    dbManager.upsertCredential(credFix)
+                end if
+            end if
+
+            if typeof(sshConn) != "shell" then
+                ui.warning("  Could not connect - still dead")
+                failed = failed + 1
+                continue
+            end if
+
+            // Connected - wipe log immediately using move trick
+            revivedComp = sshConn.host_computer
+            if revivedComp != null then
+                revivedComp.touch("/var", "t")
+                revivedEmpty = revivedComp.File("/var/t")
+                if revivedEmpty != null then
+                    revivedEmpty.move("/var", "system.log")
+                end if
+            end if
+
+            // Update health status
+            bounceManager.setStatus(cIp, "healthy")
+            dbManager.save()
+
+            ui.success("  " + cIp + " is back online - revived ✓  (log wiped)")
+            revived = revived + 1
+        end for
+
+        ui.print("")
+        ui.info("Revived: " + str(revived) + "  Failed: " + str(failed) + "  Skipped: " + str(skipped))
+        if revived > 0 then
+            ui.info("Run 'bounces update' to re-add revived machines to bounce network if needed")
+        end if
+        ui.separator()
+
+    // ── remove ───────────────────────────────────────────────────────────
+    else if sub == "remove" then
+        removeIp = params.subcommand2.trim
+        if removeIp.len == 0 then
+            removeIp = user_input("  IP to remove from bounce pool: ").trim
+        end if
+        if removeIp.len == 0 then
+            return Error.New("IP required", "MISSING_PARAM")
+        end if
+        existing = bounceManager.findBounce(removeIp)
+        if existing == null then
+            return Error.New(removeIp + " is not in the bounce pool", "NOT_FOUND")
+        end if
+        bounceManager.removeBounce(removeIp)
+        dbManager.save()
+        ui.success("Removed " + removeIp + " from bounce pool")
+        ui.info("Run: bounces reset " + removeIp + "  to allow re-adding later")
+
+    else
+        return Error.New("Unknown subcommand: " + sub + ". Use: update / map / chain / verify / wipe / harden / reset / remove / add / revive / restore", "UNKNOWN_SUB")
+    end if
+end function
+commandManager.register(_cmd)

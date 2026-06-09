@@ -1,0 +1,124 @@
+// ============================================================
+// CORVID 2.0 | managers/session/session
+// Session factory  -  wraps any raw game object or facade
+// in the appropriate session type.
+// ============================================================
+
+Session = {}
+Session.handler = null
+Session.data    = {}
+Session.label   = ""
+
+Session.New = function(object, label)
+    // Already a session  -  return as-is
+    if object isa Session then
+        return object
+    end if
+
+    if label == null then
+        label = ""
+    end if
+
+    result         = new Session
+    result.data    = {}
+    result.label   = label
+
+    // Wrap raw game objects in facades first
+    if typeof(object) == "shell" then
+        wrapped = Shell.New(object)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        handler = ShellSession.New(wrapped)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler = handler
+        result.data.ip = handler.ip()
+        // Navigate to home directory
+        if handler.user == "root" then
+            handler.goTo("/root")
+        else if handler.user != "unknown" then
+            handler.goTo("/home/" + handler.user)
+        end if
+        return result
+    end if
+
+    if typeof(object) == "computer" then
+        wrapped = Computer.New(object)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        handler = ComputerSession.New(wrapped)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler = handler
+        result.data.ip = handler.ip()
+        if handler.user == "root" then
+            handler.goTo("/root")
+        else if handler.user != "unknown" then
+            handler.goTo("/home/" + handler.user)
+        end if
+        return result
+    end if
+
+    if typeof(object) == "file" then
+        wrapped = File.New(object)
+        if wrapped isa Error then
+            return wrapped
+        end if
+        handler = FileSession.New(wrapped)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler  = handler
+        result.data.ip  = {"public": "unknown", "local": "unknown"}
+        return result
+    end if
+
+    // Shell facade
+    if object isa Shell then
+        handler = ShellSession.New(object)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler = handler
+        result.data.ip = handler.ip()
+        if handler.user == "root" then
+            handler.goTo("/root")
+        else if handler.user != "unknown" then
+            handler.goTo("/home/" + handler.user)
+        end if
+        return result
+    end if
+
+    // Computer facade
+    if object isa Computer then
+        handler = ComputerSession.New(object)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler = handler
+        result.data.ip = handler.ip()
+        if handler.user == "root" then
+            handler.goTo("/root")
+        else if handler.user != "unknown" then
+            handler.goTo("/home/" + handler.user)
+        end if
+        return result
+    end if
+
+    // File facade
+    if object isa File then
+        handler = FileSession.New(object)
+        if handler isa Error then
+            return handler
+        end if
+        result.handler  = handler
+        result.data.ip  = {"public": "unknown", "local": "unknown"}
+        return result
+    end if
+
+    return Error.New("Cannot create session from object of type: " + typeof(object), "TYPE_ERROR")
+end function

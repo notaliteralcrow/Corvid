@@ -1,0 +1,132 @@
+// ============================================================
+// CORVID 2.0 | managers/config/config-manager
+// Persists configuration to /Config/corvid-config.json
+// on the pivot session. Loaded once on startup, saved
+// whenever a setting changes.
+// ============================================================
+
+ConfigManager = {}
+ConfigManager.mediator = null
+ConfigManager.config   = {}
+
+ConfigManager.getConfigPath = function()
+    sessionManager = self.mediator.getExtension("sessionManager")
+    handler        = sessionManager.pivotSession.handler
+    user           = handler.user
+
+    cfgDir = "/home/guest/Config"
+    if user == "root" then
+        cfgDir = "/root/Config"
+    else if user != "guest" then
+        cfgDir = "/home/" + user + "/Config"
+    end if
+
+    folder = handler.getFile(cfgDir)
+    if folder isa Error then
+        return folder
+    end if
+
+    return cfgDir + "/corvid-config.json"
+end function
+
+ConfigManager.init = function()
+    sessionManager = self.mediator.getExtension("sessionManager")
+    handler        = sessionManager.pivotSession.handler
+
+    path = self.getConfigPath()
+    if path isa Error then
+        return path
+    end if
+
+    file = handler.getFile(path)
+    if file isa Error then
+        // Create with defaults
+        result = handler.createFile(path)
+        if result isa Error then
+            return result
+        end if
+        file = handler.getFile(path)
+        if file isa Error then
+            return file
+        end if
+        self.config = self.defaults()
+        file.setContent(toJSON(self.config))
+        return
+    end if
+
+    content = file.content()
+    if content isa Error or content.len == 0 then
+        self.config = self.defaults()
+        file.setContent(toJSON(self.config))
+        return
+    end if
+
+    parsed = parse(content)
+    if parsed == null then
+        self.config = self.defaults()
+    else
+        // Merge with defaults so new keys always exist
+        self.config = self.defaults() + parsed
+    end if
+end function
+
+ConfigManager.defaults = function()
+    d = {}
+    d.theme = {}
+    d.theme.highlight = "#8B00FF"
+    d.theme.text      = "#ffffff"
+    d.theme.secondary = "#555555"
+    d.theme.success   = "#00ff00"
+    d.theme.warning   = "#FFFC33"
+    d.theme.info      = "#058FAB"
+    d.theme.danger    = "#FF4444"
+    d.theme.error     = "#FF4444"
+    d.aliases = {}
+    d.rshellPort = 1222
+    d.autoSave   = true
+    d.autoWhois  = true
+    return d
+end function
+
+ConfigManager.get = function(key)
+    if not self.config.hasIndex(key) then
+        return Error.New("Config key not found: " + key, "NOT_FOUND")
+    end if
+    return self.config[key]
+end function
+
+ConfigManager.set = function(key, value)
+    self.config[key] = value
+    return self.save()
+end function
+
+ConfigManager.merge = function(data)
+    for kv in data
+        self.config[kv.key] = kv.value
+    end for
+    return self.save()
+end function
+
+ConfigManager.save = function()
+    sessionManager = self.mediator.getExtension("sessionManager")
+    handler        = sessionManager.pivotSession.handler
+    path           = self.getConfigPath()
+    if path isa Error then
+        return path
+    end if
+    file = handler.getFile(path)
+    if file isa Error then
+        return file
+    end if
+    return file.setContent(toJSON(self.config))
+end function
+
+ConfigManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+ConfigManager.New = function()
+    result = new ConfigManager
+    result.config = {}
+    return result
+end function

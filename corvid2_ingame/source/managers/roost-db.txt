@@ -1,0 +1,108 @@
+// ============================================================
+// CORVID 2.0 | managers/roost/roost-db
+// Database collection for roost nodes.
+// Stored separately from bounce pool.
+// ============================================================
+
+RoostDb = {}
+RoostDb.records = []
+RoostDb.mediator = null
+
+ROOST_STATUS = {}
+ROOST_STATUS.ACTIVE   = "active"
+ROOST_STATUS.DORMANT  = "dormant"
+ROOST_STATUS.DEAD     = "dead"
+
+RoostDb.add = function(publicIp, lanIp, processName)
+    // Check for duplicate
+    for r in self.records
+        if r.public_ip == publicIp then
+            r.status = ROOST_STATUS.ACTIVE
+            r.process_name = processName
+            r.last_used = 0
+            return r
+        end if
+    end for
+    record = {}
+    record.public_ip     = publicIp
+    record.lan_ip        = lanIp
+    record.process_name  = processName
+    record.status        = ROOST_STATUS.ACTIVE
+    record.last_used     = 0
+    self.records.push(record)
+    return record
+end function
+
+RoostDb.remove = function(publicIp)
+    for i in range(0, self.records.len - 1)
+        if self.records[i].public_ip == publicIp then
+            self.records.remove(i)
+            return true
+        end if
+    end for
+    return false
+end function
+
+RoostDb.find = function(publicIp)
+    for r in self.records
+        if r.public_ip == publicIp then
+            return r
+        end if
+    end for
+    return null
+end function
+
+RoostDb.setStatus = function(publicIp, status)
+    r = self.find(publicIp)
+    if r != null then
+        r.status = status
+    end if
+end function
+
+RoostDb.markUsed = function(publicIp)
+    r = self.find(publicIp)
+    if r != null then
+        r.last_used = time
+    end if
+end function
+
+RoostDb.listActive = function()
+    result = []
+    for r in self.records
+        if r.status == ROOST_STATUS.ACTIVE then
+            result.push(r)
+        end if
+    end for
+    return result
+end function
+
+RoostDb.pickLeastUsed = function()
+    active = self.listActive()
+    if active.len == 0 then
+        return null
+    end if
+    best = active[0]
+    for r in active
+        if r.last_used < best.last_used then
+            best = r
+        end if
+    end for
+    return best
+end function
+
+RoostDb.load = function(data)
+    if data == null then
+        return
+    end if
+    if data.hasIndex("roost") then
+        self.records = data.roost
+    end if
+end function
+
+RoostDb.save = function(data)
+    data.roost = self.records
+end function
+
+RoostDb.setMediator = function(mediator)
+    self.mediator = mediator
+end function

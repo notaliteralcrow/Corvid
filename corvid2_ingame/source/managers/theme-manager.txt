@@ -1,0 +1,99 @@
+// ============================================================
+// CORVID 2.0 | managers/theme/theme-manager
+// Color scheme management. Colors stored in config.
+// Default theme is Corvid purple/green/amber.
+// All UI output goes through theme color functions.
+// ============================================================
+
+THEME = {}
+THEME.HIGHLIGHT = "highlight"
+THEME.TEXT      = "text"
+THEME.SECONDARY = "secondary"
+THEME.SUCCESS   = "success"
+THEME.WARNING   = "warning"
+THEME.INFO      = "info"
+THEME.DANGER    = "danger"
+THEME.ERROR     = "error"
+
+ThemeManager = {}
+ThemeManager.mediator = null
+ThemeManager.colors   = {}
+
+ThemeManager.init = function()
+    configManager = self.mediator.getExtension("configManager")
+    theme = configManager.get("theme")
+    if theme isa Error then
+        self.colors = self.defaultColors()
+    else
+        self.colors = self.defaultColors() + theme
+    end if
+end function
+
+ThemeManager.defaultColors = function()
+    c = {}
+    c.highlight = "#8B00FF"
+    c.text      = "#ffffff"
+    c.secondary = "#555555"
+    c.success   = "#00ff00"
+    c.warning   = "#FFFC33"
+    c.info      = "#058FAB"
+    c.danger    = "#FF4444"
+    c.error     = "#FF4444"
+    return c
+end function
+
+ThemeManager.colorize = function(colorName, str)
+    if not self.colors.hasIndex(colorName) then
+        return str
+    end if
+    hex = self.colors[colorName]
+    return "<color=" + hex + ">" + str + "</color>"
+end function
+
+ThemeManager.highlight = function(str)
+    return self.colorize(THEME.HIGHLIGHT, str)
+end function
+
+ThemeManager.text = function(str)
+    return self.colorize(THEME.TEXT, str)
+end function
+
+ThemeManager.secondary = function(str)
+    return self.colorize(THEME.SECONDARY, str)
+end function
+
+ThemeManager.success = function(str)
+    return self.colorize(THEME.SUCCESS, str)
+end function
+
+ThemeManager.warning = function(str)
+    return self.colorize(THEME.WARNING, str)
+end function
+
+ThemeManager.info = function(str)
+    return self.colorize(THEME.INFO, str)
+end function
+
+ThemeManager.danger = function(str)
+    return self.colorize(THEME.DANGER, str)
+end function
+
+ThemeManager.error = function(str)
+    return self.colorize(THEME.ERROR, str)
+end function
+
+ThemeManager.setColor = function(colorName, hex)
+    self.colors[colorName] = hex
+    configManager = self.mediator.getExtension("configManager")
+    configManager.set("theme", self.colors)
+end function
+
+ThemeManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+ThemeManager.New = function()
+    result = new ThemeManager
+    result.colors = {}
+    return result
+end function

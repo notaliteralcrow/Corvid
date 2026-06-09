@@ -1,0 +1,1081 @@
+// CORVID 2.0 | managers/attack/attack-manager
+// Orchestrates the full attack workflow.
+// Checks database for existing exploit data before scanning.
+// Stores results back to database after testing.
+// Feeds target records into the database automatically.
+// ============================================================
+
+AttackManager = {}
+AttackManager.mediator = null
+
+AttackManager.buildLibKey = function(lib)
+    // lib here is a raw MetaLib from dump_lib()
+    return lib.lib_name + "_" + lib.version
+end function
+
+AttackManager.getOrCreateTarget = function(publicIp, lanIp, routerIp)
+    dbManager = self.mediator.getExtension("databaseManager")
+    existing  = dbManager.findTarget(publicIp)
+    if existing.len > 0 then
+        return existing[0]
+    end if
+
+    targetData = {}
+    targetData.public_ip = publicIp
+    targetData.lan_ip    = lanIp
+    targetData.router_ip = routerIp
+    targetData.status    = TARGET_STATUS.UNKNOWN
+    id = dbManager.upsertTarget(targetData)
+    return dbManager.getTarget(id)
+end function
+
+AttackManager.runScan = function(publicIp, port, lanIp, routerIp)
+    // Perform a scan cycle, storing results to DB.
+    // Checks exploit KB first to skip scanning known lib/versions.
+    ui           = self.mediator.getExtension("corvidUi")
+    dbManager    = self.mediator.getExtension("databaseManager")
+    metaxManager = self.mediator.getExtension("metaxploitManager")
+
+    target = self.getOrCreateTarget(publicIp, lanIp, routerIp)
+
+    metaxploit = metaxManager.getMetaxploit()
+    if metaxploit isa Error then
+        return metaxploit
+    end if
+
+    session = metaxploit.netUse(publicIp, port)
+    if session isa Error then
+        return session
+    end if
+
+    rawLib = session.dump_lib()
+    if rawLib == null then
+        return Error.New("Could not get target library", "DUMP_LIB_ERROR")
+    end if
+
+    libName    = rawLib.lib_name
+    libVersion = rawLib.version
+    libKey     = self.buildLibKey(rawLib)
+
+    // ── Check exploit KB first ────────────────────────────────────────────
+    kbResults = dbManager.kbLookup(libName, libVersion)
+    if kbResults.len > 0 then
+        // Build storable list from KB records - prioritise successes
+        fromKb = []
+        for kr in kbResults
+            if kr.outcome == "success" then
+                entry = {}
+                entry.address   = kr.address
+                entry.exploit   = kr.exploit
+                entry.rtype     = kr.rtype
+                entry.privilege = kr.privilege
+                fromKb.push(entry)
+            end if
+        end for
+        // Also include constraint_blocked - conditions may have changed
+        for kr in kbResults
+            if kr.outcome == "constraint_blocked" then
+                entry = {}
+                entry.address   = kr.address
+                entry.exploit   = kr.exploit
+                entry.rtype     = kr.rtype
+                entry.privilege = kr.privilege
+                fromKb.push(entry)
+            end if
+        end for
+        if fromKb.len > 0 then
+            ui.success("KB hit: " + libName + " v" + libVersion + " - " + str(fromKb.len) + " known exploit(s) - skipping scan")
+            // Store to per-target DB too so deep escalation can find them
+            existing = dbManager.getExploits(target.id, libKey)
+            if existing.len == 0 then
+                dbManager.storeExploits(target.id, libKey, fromKb)
+            end if
+            return fromKb
+        end if
+        ui.dim("KB: " + libName + " v" + libVersion + " known but no successes yet - running full scan")
+    end if
+
+    // ── Check per-target cache ────────────────────────────────────────────
+    existing = dbManager.getExploits(target.id, libKey)
+    if existing.len > 0 then
+        ui.info("Existing exploit data found for " + libKey + "  -  " + existing.len + " record(s)")
+        return existing
+    end if
+
+    // ── Full scan (respect kbFallback toggle) ─────────────────────────────
+    kbFallbackCfg = "1"
+    cfgMgrScan = self.mediator.getExtension("configManager")
+    if cfgMgrScan != null then
+        kbFbVal = cfgMgrScan.get("kbFallback")
+        if not (kbFbVal isa Error) then
+            kbFallbackCfg = kbFbVal
+        end if
+    end if
+    if kbFallbackCfg != "1" then
+        ui.dim("  kbFallback OFF — skipping full scan for unknown lib")
+        return []
+    end if
+    ui.info("Scanning " + publicIp + ":" + str(port) + " (" + libKey + ")...")
+    results = metaxManager.hack(publicIp, port)
+    if results isa Error then
+        return results
+    end if
+
+    ui.success("Found " + str(results.len) + " result(s).")
+
+    // Feed raw scan texts into shinylibs while we have the lib loaded
+    shinyMgr = self.mediator.getExtension("shinyLibsManager")
+    if shinyMgr != null then
+        configMgr = self.mediator.getExtension("configManager")
+        autoShiny = configMgr.get("autoShiny")
+        if autoShiny isa Error then
+            autoShiny = "1"
+        end if
+        if autoShiny == "1" then
+            metaFacade = metaxManager.getMetaxploit()
+            if not (metaFacade isa Error) then
+                exploitTexts = []
+                addrs = metaFacade.scan(rawLib)
+                if addrs != null then
+                    for addr in addrs
+                        txt = metaFacade.scanAddress(rawLib, addr)
+                        if txt != null and not (txt isa Error) then
+                            exploitTexts.push(txt)
+                        end if
+                    end for
+                end if
+                if exploitTexts.len > 0 then
+                    shinyType = shinyMgr.db.stage(libName, libVersion, exploitTexts, "")
+                    if shinyType != null then
+                        ui.dim("  [shiny] " + libName + " v" + libVersion + " staged as " + shinyType)
+                    end if
+                end if
+            end if
+        end if
+    end if
+
+    // Store metadata to per-target DB and exploit KB
+    storable = []
+    for r in results
+        entry = {}
+        entry.address   = r.address
+        entry.exploit   = r.exploit
+        entry.rtype     = r.rtype
+        entry.privilege = r.privilege
+        storable.push(entry)
+
+        // Record in KB - determine outcome from rtype
+        kbOutcome = "uncertain"
+        kbRtype   = r.rtype
+        kbPath    = ""
+        kbPriv    = ""
+        if r.rtype == "shell" or r.rtype == "computer" then
+            kbOutcome = "success"
+            kbPriv    = r.privilege
+        else if r.rtype == "file" then
+            kbOutcome = "success"
+            kbPath    = r.privilege  // privilege field holds path for file results
+        else if r.rtype == "Failed" then
+            kbOutcome = "uncertain"
+        end if
+        // Constraints not available from hack() - will be populated on explicit exploit attempt
+        dbManager.kbRecord(libName, libVersion, r.address, r.exploit, kbOutcome, [], kbRtype, kbPath, kbPriv, "")
+    end for
+
+    dbManager.storeExploits(target.id, libKey, storable)
+
+    hasBetter = false
+    for r in results
+        if r.rtype == "shell" or r.rtype == "computer" then
+            hasBetter = true
+        end if
+    end for
+    if hasBetter then
+        dbManager.setTargetStatus(target.id, TARGET_STATUS.SCANNED)
+    end if
+
+    portRecord = {}
+    portRecord.port      = port
+    portRecord.service   = libName
+    portRecord.version   = libVersion
+    portRecord.forwarded = true
+    portRecord.exploited = false
+    targetData = {}
+    targetData.public_ip = publicIp
+    targetData.lan_ip    = lanIp
+    targetData.ports     = [portRecord]
+    dbManager.upsertTarget(targetData)
+    dbManager.save()
+    return storable
+end function
+
+AttackManager.exploit = function(publicIp, port, lanIp, routerIp, resultIndex)
+    // Run a specific exploit by index from the stored results.
+    ui           = self.mediator.getExtension("corvidUi")
+    dbManager    = self.mediator.getExtension("databaseManager")
+    metaxManager = self.mediator.getExtension("metaxploitManager")
+    sessionManager = self.mediator.getExtension("sessionManager")
+
+    // Get target and lib key
+    metaxploit = metaxManager.getMetaxploit()
+    if metaxploit isa Error then
+        return metaxploit
+    end if
+
+    session = metaxploit.netUse(publicIp, port)
+    if session isa Error then
+        return session
+    end if
+    rawLib = session.dump_lib()
+    if rawLib == null then
+        return Error.New("Could not get target library", "DUMP_LIB_ERROR")
+    end if
+    libKey = self.buildLibKey(rawLib)
+
+    target = self.getOrCreateTarget(publicIp, lanIp, routerIp)
+    storedResults = dbManager.getExploits(target.id, libKey)
+    if storedResults.len == 0 then
+        return Error.New("No scan data found. Run scan first.", "NO_SCAN_DATA")
+    end if
+
+    if resultIndex == null then
+        // Auto-select best
+        selected = self.autoSelectBest(storedResults)
+    else
+        if not storedResults.hasIndex(resultIndex) then
+            return Error.New("Invalid result index: " + resultIndex, "OUT_OF_RANGE")
+        end if
+        selected = storedResults[resultIndex]
+    end if
+
+    if selected == null then
+        return Error.New("No usable exploit found in stored results", "NO_EXPLOIT")
+    end if
+
+    ui.info("Running exploit: " + selected.address + " | " + selected.exploit)
+
+    // If this is a password-change exploit, attempt to harvest the CURRENT
+    // root password BEFORE we change it, so native_pass can be preserved
+    if selected.hasIndex("privilege") and selected.privilege.len > 0 and selected.privilege != "none" and selected.privilege != "guest" then
+        ui.info("Password-change exploit detected - attempting to read current passwd first...")
+        crypto = include_lib("/lib/crypto.so")
+        if crypto == null then
+            crypto = include_lib(current_path + "/crypto.so")
+        end if
+        if crypto != null then
+            // Try to get the target computer via a net_use connection
+            preNet = metaxploit.netUse(publicIp, port)
+            if not (preNet isa Error) then
+                // Use the session to get computer object if possible
+                // Attempt via any existing shell session for this IP
+                existingSessions = sessionManager.sessions
+                for es in existingSessions
+                    if es.data.ip.public != publicIp then
+                        continue
+                    end if
+                    if not (es.handler isa ShellSession) then
+                        continue
+                    end if
+                    // Try to read /etc/passwd on the target
+                    passwdFile = es.handler.getFile("/etc/passwd")
+                    if passwdFile isa Error then
+                        continue
+                    end if
+                    rawHash = passwdFile.content()
+                    if rawHash isa Error or rawHash.len == 0 then
+                        continue
+                    end if
+                    nativePass = crypto.decipher(rawHash)
+                    if nativePass != null and nativePass.len > 0 then
+                        ui.success("  Native root password captured: " + nativePass)
+                        // Save as native credential BEFORE the change
+                        nativeCred = {}
+                        nativeCred.type      = "system"
+                        nativeCred.username  = selected.privilege
+                        nativeCred.password  = nativePass
+                        nativeCred.public_ip = publicIp
+                        nativeCred.lan_ip    = lanIp
+                        nativeCred.source    = "native"
+                        dbManager.upsertCredential(nativeCred)
+                        dbManager.save()
+                        ui.info("  Saved native credential to DB before password change")
+                    end if
+                    break
+                end for
+            end if
+        end if
+    end if
+
+    // Generate a clean alphanumeric password for password-change exploits
+    genPass = genRandomPass(12, selected.address)
+
+    // Fresh connection - capture lib name/version for KB recording
+    freshSession = metaxploit.netUse(publicIp, port)
+    if freshSession isa Error then
+        return freshSession
+    end if
+    freshLib = freshSession.dump_lib()
+    if freshLib == null then
+        return Error.New("Could not reconnect", "CONNECT_ERROR")
+    end if
+
+    kbLibName    = freshLib.lib_name
+    kbLibVersion = freshLib.version
+
+    // Check constraint state before attempting - record as blocked not failed
+    kbConstraints = []
+    kbExploitKb   = dbManager.getExploitKb()
+    // Look up known constraints for this exploit
+    kbExisting = dbManager.kbLookup(kbLibName, kbLibVersion)
+    for kbe in kbExisting
+        if kbe.address == selected.address and kbe.exploit == selected.exploit then
+            if kbe.hasIndex("constraints") and kbe.constraints.len > 0 then
+                for cs in kbe.constraints.split(" ")
+                    if cs.len > 0 then
+                        kbConstraints.push(cs)
+                    end if
+                end for
+            end if
+        end if
+    end for
+
+    // Check if any known constraints are currently unmet
+    if kbConstraints.len > 0 then
+        blockedBy = kbExploitKb.checkConstraints(kbConstraints, freshSession, lanIp)
+        if blockedBy.len > 0 then
+            ui.warning("Constraint not met: " + blockedBy + " - recording as blocked, not failed")
+            dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, "constraint_blocked", kbConstraints, selected.rtype, "", "", blockedBy)
+            dbManager.save()
+            return Error.New("Constraint not met: " + blockedBy, "CONSTRAINT_BLOCKED")
+        end if
+    end if
+
+    // Try WITHOUT genPass first - avoids changing root password unnecessarily
+    // Only fall back to genPass if this is a password-change exploit and the clean attempt failed
+    raw = freshLib.overflow(selected.address, selected.exploit)
+    passwordWasChanged = false
+
+    if (raw == null or typeof(raw) == "string") and self.isPasswordChange(selected) then
+        ui.dim("  Non-destructive attempt failed - trying password-change path...")
+        raw = freshLib.overflow(selected.address, selected.exploit, genPass)
+        if raw != null and typeof(raw) != "string" then
+            passwordWasChanged = true
+        end if
+    end if
+
+    if raw == null then
+        dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, "uncertain", kbConstraints, selected.rtype, "", "", "")
+        dbManager.save()
+        return Error.New("Exploit returned null", "EXPLOIT_FAILED")
+    end if
+    if typeof(raw) == "string" and raw.indexOf("alphanumeric") != null then
+        dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, "uncertain", kbConstraints, selected.rtype, "", "", "")
+        dbManager.save()
+        return Error.New("Exploit failed: " + raw + " (password-change exploit with special chars)", "ALPHANUMERIC_ERROR")
+    end if
+    if typeof(raw) == "string" then
+        dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, "uncertain", kbConstraints, selected.rtype, "", "", "")
+        dbManager.save()
+        return Error.New("Exploit failed: " + raw, "EXPLOIT_FAILED")
+    end if
+
+    // Wrap result
+    result = computerObjectFactory(raw)
+    if result isa Error then
+        return result
+    end if
+
+    // Determine privilege
+    privilege = "unknown"
+    if result isa Shell then
+        comp = result.getComputer()
+        if not (comp isa Error) then
+            privilege = metaxManager.detectPrivilege(comp.computer)
+        end if
+    else if result isa Computer then
+        privilege = metaxManager.detectPrivilege(result.computer)
+    end if
+
+    // Record success in exploit KB
+    kbRtype   = typeof(result)
+    kbPath    = ""
+    kbPriv    = privilege
+    if result isa File then
+        kbPath  = result.path()
+        kbPriv  = ""
+    end if
+    dbManager.kbRecord(kbLibName, kbLibVersion, selected.address, selected.exploit, "success", kbConstraints, kbRtype, kbPath, kbPriv, "")
+
+    // Only save generated password if we actually changed it
+    // If the non-destructive path worked, the original password is intact
+    if passwordWasChanged and selected.hasIndex("privilege") and selected.privilege.len > 0 then
+        credData = {}
+        credData.username  = selected.privilege
+        credData.password  = genPass
+        credData.type      = "system"
+        credData.public_ip = publicIp
+        credData.lan_ip    = lanIp
+        credData.source    = "exploit_generated"
+        dbManager.upsertCredential(credData)
+        ui.info("Password changed for " + selected.privilege + ": " + genPass)
+    end if
+
+    // Update database
+    dbManager.setTargetStatus(target.id, TARGET_STATUS.EXPLOITED)
+    targetData = {}
+    targetData.public_ip = publicIp
+    targetData.lan_ip    = lanIp
+    targetData.privilege = privilege
+    targetData.status    = TARGET_STATUS.EXPLOITED
+    dbManager.upsertTarget(targetData)
+    dbManager.save()
+
+    // Add as new session
+    newSession = sessionManager.addSession(raw, publicIp + ":" + port)
+    if newSession isa Error then
+        return newSession
+    end if
+    sessionManager.setCurrentSession(newSession)
+
+    ui.success("Exploit succeeded. Session opened as: " + privilege)
+
+    // Show shinylibs notification if anything was staged during runScan
+    shinyMgr = self.mediator.getExtension("shinyLibsManager")
+    if shinyMgr != null and shinyMgr.db.staged.len > 0 then
+        shinyMgr.showStagedNotification()
+    end if
+
+    return result
+end function
+
+AttackManager.escalate = function()
+    // Attempt privilege escalation on current session.
+    // Strategy order:
+    //   0. Decipher /etc/passwd to surface root password
+    //   1. GCO sudo (get_shell) - works from guest, no open port required
+    //   2. Stored exploit direct root shell
+    //   3. connect_service SSH/FTP with known passwords (known ports only)
+    //   4. SCP local lib scan
+    //   5. Chainsaw password cracker via GCO RCE
+
+    ui             = self.mediator.getExtension("corvidUi")
+    sessionManager = self.mediator.getExtension("sessionManager")
+    dbManager      = self.mediator.getExtension("databaseManager")
+    metaxManager   = self.mediator.getExtension("metaxploitManager")
+
+    currentSession = sessionManager.currentSession
+    handler        = currentSession.handler
+    if handler.type() != "shell" then
+        return Error.New("Escalation requires a shell session", "TYPE_ERROR")
+    end if
+
+    if handler.privilege() == "root" then
+        ui.success("Already root.")
+        return
+    end if
+
+    ip    = currentSession.data.ip.public
+    lanIp = currentSession.data.ip.local
+    rawShell = handler.shell.shell
+
+    // Collect root passwords to try (current + native)
+    creds = dbManager.findCredentialsByIp(ip)
+    if lanIp.len > 0 and lanIp != ip then
+        lanCreds = dbManager.findCredentialsByIp(lanIp)
+        for lc in lanCreds
+            creds.push(lc)
+        end for
+    end if
+
+    rootPasswords = dbManager.extractRootPasswords(ip)
+
+    // ── Pre-strategy: harvest current session to surface credentials ───────
+    // Harvest passwd, mail, bank before trying credentials - populates DB
+    // so that Strategy 2 has the best credential data to work with
+    intelManager = self.mediator.getExtension("intelManager")
+    if not (intelManager isa Error) then
+        ui.info("Harvesting session before escalation attempt...")
+        harvestResult = intelManager.harvestAll(ip, lanIp, true)
+        if not (harvestResult isa Error) then
+            ui.success("Harvest complete - credentials updated in DB")
+            // Refresh creds from DB after harvest
+            creds = dbManager.findCredentialsByIp(ip)
+            if lanIp.len > 0 and lanIp != ip then
+                lanCreds = dbManager.findCredentialsByIp(lanIp)
+                for lc in lanCreds
+                    creds.push(lc)
+                end for
+            end if
+            rootPasswords = dbManager.extractRootPasswords(ip)
+        end if
+    end if
+
+    // Load metaxploit once for all strategies
+    // Always use the current lib from libManager - this will be the roost
+    // node's lib if roost pick was used, otherwise falls back to Nest lib.
+    // Strategy 1 uses net_use which always routes from Nest regardless - skip
+    // it when on a non-pivot session to avoid exposing Nest IP.
+    metaLib = metaxManager.getMetaxploit()
+    if metaLib isa Error then
+        meta = null
+    else
+        meta = metaLib.metaxploit
+    end if
+
+    onPivot = (currentSession == sessionManager.pivotSession)
+
+    // ── Strategy 0: decipher /etc/passwd directly ────────────────────────
+    // Always attempt this regardless of what's in DB - we need the current
+    // machine's root hash cracked. Bypass harvest skip logic entirely.
+    ui.info("Deciphering /etc/passwd...")
+    passwdResult = intelManager.harvestPasswd(currentSession.handler, ip, lanIp)
+    if passwdResult isa Error then
+        ui.warning("passwd: " + passwdResult.message)
+    else
+        ui.success("passwd: " + str(passwdResult.cracked) + " cracked, " + str(passwdResult.failed) + " failed")
+        // Refresh rootPasswords from DB after decipher
+        creds = dbManager.findCredentialsByIp(ip)
+        if lanIp.len > 0 and lanIp != ip then
+            for lc in dbManager.findCredentialsByIp(lanIp)
+                creds.push(lc)
+            end for
+        end if
+        rootPasswords = []
+        for cred in creds
+            if cred.type != CRED_TYPES.SYSTEM then
+                continue
+            end if
+            if cred.username != "root" then
+                continue
+            end if
+            if cred.password.len > 0 and rootPasswords.indexOf(cred.password) == null then
+                rootPasswords.push(cred.password)
+            end if
+            if cred.hasIndex("native_pass") and cred.native_pass.len > 0 then
+                if rootPasswords.indexOf(cred.native_pass) == null then
+                    rootPasswords.push(cred.native_pass)
+                end if
+            end if
+        end for
+    end if
+
+    ui.info("Checking stored exploits for direct root shell...")
+    targets = dbManager.findTarget(ip)
+    foundRootShell = false
+
+    // ── Strategy 1: GCO sudo (get_shell without SSH port) ────────────────
+    // First attempt - works from guest and user, no open port required.
+    // Requires a cracked root password in rootPasswords AND a writable path.
+    if rootPasswords.len > 0 then
+        ui.info("Strategy 1: attempting escalation via Clover Method...")
+        wp3 = findWritePerms(rawShell)
+        if wp3 == null then
+            ui.dim("  GCO: no writable path found - skipping")
+        else
+            sudoPass3 = rootPasswords[0]
+            q = char(34)
+            sudoSrcLines = "cob = get_custom_object" + char(10)
+            sudoSrcLines = sudoSrcLines + "cob.shell = get_shell(" + q + "root" + q + ", " + q + sudoPass3 + q + ")"
+            rawShell.host_computer.touch(wp3.path, "csudo.src")
+            sudoSrcFile = rawShell.host_computer.File(wp3.path + "/csudo.src")
+            if sudoSrcFile == null then
+                ui.dim("  GCO: could not create script file - skipping")
+            else
+                sudoSrcFile.set_content(sudoSrcLines)
+                buildResult3 = rawShell.build(wp3.path + "/csudo.src", wp3.path)
+                if buildResult3.len > 0 then
+                    ui.dim("  GCO: build failed - " + buildResult3)
+                    csudoSrc = rawShell.host_computer.File(wp3.path + "/csudo.src")
+                    if csudoSrc != null then
+                        csudoSrc.delete()
+                    end if
+                else
+                    rawShell.launch(wp3.path + "/csudo")
+                    cob3 = get_custom_object
+                    if cob3.hasIndex("shell") and typeof(cob3.shell) == "shell" then
+                        sudoShell3 = cob3.shell
+                        for s3name in ["csudo.src", "csudo"]
+                            s3f = rawShell.host_computer.File(wp3.path + "/" + s3name)
+                            if s3f != null then
+                                s3f.delete()
+                            end if
+                        end for
+                        newSess3 = sessionManager.addSession(sudoShell3, "root@" + ip)
+                        if not (newSess3 isa Error) then
+                            sessionManager.setCurrentSession(newSess3)
+                            targetsForUpdate = dbManager.findTarget(ip)
+                            if targetsForUpdate.len > 0 then
+                                dbManager.setTargetStatus(targetsForUpdate[0].id, TARGET_STATUS.EXPLOITED)
+                                updateData3 = {}
+                                updateData3.public_ip = ip
+                                updateData3.lan_ip    = lanIp
+                                updateData3.privilege = "root"
+                                updateData3.status    = TARGET_STATUS.EXPLOITED
+                                dbManager.upsertTarget(updateData3)
+                            end if
+                            credUpdate3 = {}
+                            credUpdate3.type      = CRED_TYPES.SYSTEM
+                            credUpdate3.username  = "root"
+                            credUpdate3.password  = sudoPass3
+                            credUpdate3.public_ip = ip
+                            credUpdate3.lan_ip    = lanIp
+                            credUpdate3.source    = "sudo_escalation"
+                            dbManager.upsertCredential(credUpdate3)
+                            dbManager.save()
+                            ui.success("Escalated to root via Clover Method")
+                            return newSess3
+                        end if
+                    else
+                        ui.dim("  GCO: get_shell returned no shell - skipping")
+                        for s3name in ["csudo.src", "csudo"]
+                            s3f2 = rawShell.host_computer.File(wp3.path + "/" + s3name)
+                            if s3f2 != null then
+                                s3f2.delete()
+                            end if
+                        end for
+                    end if
+                end if
+            end if
+        end if
+    else
+        ui.dim("  GCO: no cracked root password available - skipping")
+    end if
+
+    // ── Strategy 2: stored exploit direct root shell ──────────────────────
+    if true then
+        for tgt in targets
+            if foundRootShell then
+                break
+            end if
+            if not tgt.hasIndex("exploit_db") then
+                continue
+            end if
+            for libKey in tgt.exploit_db.indexes
+                if foundRootShell then
+                    break
+                end if
+                for ex in tgt.exploit_db[libKey]
+                    if ex.rtype != "shell" then
+                        continue
+                    end if
+                    if ex.privilege != "root" then
+                        continue
+                    end if
+                    targetPort = 0
+                    for pr in tgt.ports
+                        lm = pr.service + "_" + pr.version
+                        if libKey.indexOf(lm) != null then
+                            targetPort = pr.port
+                        end if
+                    end for
+                    if targetPort == 0 then
+                        continue
+                    end if
+                    if meta == null then
+                        continue
+                    end if
+                    netSess = meta.net_use(ip, targetPort)
+                    if not netSess then
+                        continue
+                    end if
+                    rawLib = netSess.dump_lib
+                    if not rawLib then
+                        continue
+                    end if
+                    result = rawLib.overflow(ex.address, ex.exploit)
+                    if result == null or typeof(result) == "string" then
+                        continue
+                    end if
+                    if typeof(result) != "shell" then
+                        continue
+                    end if
+                    newSession = sessionManager.addSession(result, "root@" + ip)
+                    if newSession isa Error then
+                        continue
+                    end if
+                    sessionManager.setCurrentSession(newSession)
+                    ui.success("Escalated to root via direct exploit on port " + str(targetPort))
+                    foundRootShell = true
+                    return newSession
+                end for
+            end for
+        end for
+    end if
+
+    // ── Strategy 3: connect_service SSH and FTP ports ─────────────────────
+    // Only tries ports actually found on the target - no blind port 22/21
+    // fallback since GCO already handles the no-SSH case above.
+    sshPorts = []
+    ftpPorts = []
+    for tgt in targets
+        if not tgt.hasIndex("ports") then
+            continue
+        end if
+        for pr in tgt.ports
+            if pr.service == "ssh" then
+                alreadyIn = false
+                for ep in sshPorts
+                    if ep.port == pr.port then
+                        alreadyIn = true
+                    end if
+                end for
+                if not alreadyIn then
+                    sshPorts.push(pr)
+                end if
+            else if pr.service == "ftp" then
+                alreadyIn = false
+                for ep in ftpPorts
+                    if ep.port == pr.port then
+                        alreadyIn = true
+                    end if
+                end for
+                if not alreadyIn then
+                    ftpPorts.push(pr)
+                end if
+            end if
+        end for
+    end for
+
+    if rootPasswords.len == 0 then
+        ui.warning("No root credentials found - skipping connect_service attempts")
+    else
+        ui.info("Trying " + str(rootPasswords.len) + " root password(s) across available service ports...")
+        for pass in rootPasswords
+            for portRec in sshPorts
+                ui.info("  Trying ssh port " + str(portRec.port) + " with password: " + pass + "...")
+                result = rawShell.connect_service(ip, portRec.port, "root", pass, "ssh")
+                if typeof(result) == "shell" then
+                    newSession = sessionManager.addSession(result, "root@" + ip)
+                    if not (newSession isa Error) then
+                        sessionManager.setCurrentSession(newSession)
+                        ui.success("Escalated to root via ssh port " + str(portRec.port))
+                        return newSession
+                    end if
+                end if
+            end for
+            for portRec in ftpPorts
+                ui.info("  Trying ftp port " + str(portRec.port) + " with password: " + pass + "...")
+                result = rawShell.connect_service(ip, portRec.port, "root", pass, "ftp")
+                if typeof(result) == "shell" then
+                    newSession = sessionManager.addSession(result, "ftp-root@" + ip)
+                    if not (newSession isa Error) then
+                        sessionManager.setCurrentSession(newSession)
+                        ui.success("Got ftp root access on port " + str(portRec.port))
+                        return newSession
+                    end if
+                end if
+            end for
+        end for
+    end if // end of Strategy 3
+
+    // ── Strategy 4: SCP local lib scan ─────────────────────────────────
+    // Pull target's .so files to Nest, scan with metaxploit, try overflows
+    // against target's open ports. Records all results in exploit KB.
+    ui.info("Strategy 4: scanning target local libraries via SCP...")
+    pivotSession2 = sessionManager.pivotSession
+    pivotHandler2 = pivotSession2.handler
+    pivotShell2   = pivotHandler2.shell.shell
+    nestComp      = pivotShell2.host_computer
+
+    // Get target lib folder
+    targetLibFolder = handler.getFile("/lib")
+    localLibWorked  = false
+
+    if not (targetLibFolder isa Error) then
+        libFiles = targetLibFolder.children()
+        if libFiles != null then
+            scannedLibs = []
+            for lf in libFiles
+                lfName = lf.name()
+                if lfName.indexOf(".so") == null then
+                    continue
+                end if
+                if lf.isBinary() == false then
+                    continue
+                end if
+
+                // SCP the lib file to Nest /tmp
+                scpDest = "/shiny/" + lfName
+                scpErr = pivotShell2.scp(lf.path(), "/shiny", handler.shell.shell)
+                if typeof(scpErr) == "string" and scpErr.len > 0 then
+                    continue
+                end if
+
+                // Load it on Nest with metaxploit
+                if meta == null then
+                    continue
+                end if
+                nestLib = meta.load(scpDest)
+                if nestLib == null then
+                    // Clean up and skip
+                    tmpF = nestComp.File(scpDest)
+                    if tmpF != null then
+                        tmpF.delete()
+                    end if
+                    continue
+                end if
+
+                ui.info("  Scanning " + lfName + " v" + nestLib.version + "...")
+                scannedLibs.push(scpDest)
+
+                // Scan for vulnerable addresses
+                addresses = meta.scan(nestLib)
+                if addresses == null or addresses.len == 0 then
+                    continue
+                end if
+
+                // Try each address against all open ports on target
+                for addr in addresses
+                    scanText = meta.scan_address(nestLib, addr)
+                    if scanText == null then
+                        continue
+                    end if
+
+                    // Parse exploit names
+                    vulnNames = []
+                    chunks = scanText.split("Unsafe check: ")
+                    for chunk in chunks
+                        if chunk == chunks[0] then
+                            continue
+                        end if
+                        bStart = chunk.indexOf("<b>")
+                        bEnd   = chunk.indexOf("</b>")
+                        if bStart != null and bEnd != null then
+                            vn = chunk[bStart+3:bEnd]
+                            if vn.len > 0 then
+                                vulnNames.push(vn)
+                            end if
+                        end if
+                    end for
+
+                    for vn in vulnNames
+                        // Try overflow - no port needed for local lib
+                        result4 = nestLib.overflow(addr, vn)
+                        if result4 == null then
+                            continue
+                        end if
+                        r4Type = typeof(result4)
+                        if r4Type == "string" then
+                            continue
+                        end if
+
+                        // Record in KB
+                        kbLibName4  = nestLib.lib_name
+                        kbLibVer4   = nestLib.version
+                        r4Priv = ""
+                        if r4Type == "shell" then
+                            r4Priv = "user"
+                        end if
+                        dbManager.kbRecord(kbLibName4, kbLibVer4, addr, vn, "success", [], r4Type, "", r4Priv, ip)
+                        dbManager.save()
+
+                        ui.success("  Local lib hit: " + lfName + " / " + vn + " -> " + r4Type)
+
+                        if r4Type == "shell" then
+                            newSess4 = sessionManager.addSession(result4, "user@" + ip)
+                            if not (newSess4 isa Error) then
+                                sessionManager.setCurrentSession(newSess4)
+                                localLibWorked = true
+                                // Clean up scp'd files
+                                for scpPath in scannedLibs
+                                    cF = nestComp.File(scpPath)
+                                    if cF != null then
+                                        cF.delete()
+                                    end if
+                                end for
+                                ui.success("Got user shell via local lib exploit on " + ip)
+                                return newSess4
+                            end if
+                        end if
+                    end for
+                end for
+
+                // Clean up this lib from Nest /tmp
+                tmpF2 = nestComp.File(scpDest)
+                if tmpF2 != null then
+                    tmpF2.delete()
+                end if
+            end for
+
+            // Clean up any remaining scp'd files
+            for scpPath in scannedLibs
+                cF2 = nestComp.File(scpPath)
+                if cF2 != null then
+                    cF2.delete()
+                end if
+            end for
+        end if
+    end if
+
+    if localLibWorked then
+        return
+    end if
+
+    // ── Strategy 5: Chainsaw via GCO RCE ───────────────────────────────────
+    // SCP chainsaw binary to target, run it there via RCE.
+    // Chainsaw loads into GCO on target, cracks root locally, returns shell.
+    ui.info("Chainsaw: attempting escalation via GCO RCE...")
+    csBinPath = "/Corvid/tools/chainsaw/chainsaw"
+    csBinFile = sessionManager.pivotSession.handler.getFile(csBinPath)
+    if csBinFile isa Error then
+        ui.dim("  Chainsaw binary not found - run: chainsaw build")
+    else
+        wp = findWritePerms(rawShell)
+        if wp != null then
+            // SCP chainsaw binary to target
+            pivotShell = sessionManager.pivotSession.handler.shell.shell
+            scpResult = pivotShell.scp(csBinPath, wp.path, rawShell)
+            if typeof(scpResult) == "string" and scpResult.len > 0 then
+                ui.dim("  Chainsaw RCE: SCP failed - " + scpResult)
+            else
+                // Write RCE script that loads chainsaw and cracks
+                q = char(34)
+                nl = char(10)
+                rceLines = "chainsaw = get_custom_object.chainsaw" + nl
+                rceLines = rceLines + "chainsaw.init()" + nl
+                rceLines = rceLines + "chainsaw.crack()"
+                rawShell.host_computer.touch(wp.path, "cs_esc.src")
+                rceFile = rawShell.host_computer.File(wp.path + "/cs_esc.src")
+                if rceFile != null then
+                    rceFile.set_content(rceLines)
+                    // Launch chainsaw binary first (--load puts it in GCO)
+                    rawShell.launch(wp.path + "/chainsaw", "load")
+                    // Build and run RCE script
+                    buildResult = rawShell.build(wp.path + "/cs_esc.src", wp.path)
+                    if buildResult.len == 0 then
+                        rawShell.launch(wp.path + "/cs_esc")
+                        if get_custom_object.hasIndex("chainsaw") and get_custom_object.chainsaw != null then
+                            csRceShell = get_custom_object.chainsaw.shell
+                            csRcePass  = get_custom_object.chainsaw.password
+                            if typeof(csRceShell) == "shell" then
+                                ui.success("Chainsaw RCE cracked root password: " + csRcePass)
+                                csRceCredData = {}
+                                csRceCredData.type      = CRED_TYPES.SYSTEM
+                                csRceCredData.username  = "root"
+                                csRceCredData.password  = csRcePass
+                                csRceCredData.public_ip = ip
+                                csRceCredData.lan_ip    = lanIp
+                                csRceCredData.source    = "chainsaw"
+                                dbManager.upsertCredential(csRceCredData)
+                                dbManager.save()
+                                // Clean up
+                                for cleanName in ["chainsaw", "cs_esc.src", "cs_esc"]
+                                    cf = rawShell.host_computer.File(wp.path + "/" + cleanName)
+                                    if cf != null then
+                                        cf.delete()
+                                    end if
+                                end for
+                                newSessRce = sessionManager.addSession(csRceShell, "root@" + ip)
+                                if not (newSessRce isa Error) then
+                                    sessionManager.setCurrentSession(newSessRce)
+                                    ui.success("Escalated to root via Chainsaw RCE")
+                                    return newSessRce
+                                end if
+                            end if
+                        end if
+                    else
+                        ui.dim("  Chainsaw RCE: build failed - " + buildResult)
+                    end if
+                    // Clean up regardless
+                    for cleanName in ["chainsaw", "cs_esc.src", "cs_esc"]
+                        cf2 = rawShell.host_computer.File(wp.path + "/" + cleanName)
+                        if cf2 != null then
+                            cf2.delete()
+                        end if
+                    end for
+                end if
+            end if
+        else
+            ui.dim("  Chainsaw RCE: no writable path found")
+        end if
+    end if
+
+    // ── All strategies exhausted ─────────────────────────────────────────
+    ui.warning("Auto-escalation failed on all paths.")
+    ui.print("")
+    if rootPasswords.len > 0 then
+        ui.info("Root password(s) found - try manually:")
+        for pass in rootPasswords
+            ui.success("  sudo -s  ->  " + pass)
+        end for
+    end if
+    ui.info("Tips:")
+    ui.print("  portfwd add 2222 22 " + lanIp + "  then re-run escalate")
+    ui.print("  Or activate a native terminal and run: sudo -s")
+    return Error.New("Auto-escalation failed - manual sudo required", "MANUAL_REQUIRED")
+end function
+
+AttackManager.isPasswordChange = function(r)
+    // A password-change exploit has privilege set to the username whose password is changed
+    // (not root, guest, none, unknown, or empty)
+    if not r.hasIndex("privilege") then
+        return false
+    end if
+    p = r.privilege
+    if p.len == 0 then
+        return false
+    end if
+    if p == "root" or p == "guest" or p == "none" or p == "unknown" then
+        return false
+    end if
+    return true
+end function
+
+AttackManager.autoSelectBest = function(results)
+    // Pass 1: root shell, non-password-change
+    for r in results
+        if r.rtype == "shell" and r.privilege == "root" and not self.isPasswordChange(r) then
+            return r
+        end if
+    end for
+    // Pass 2: any shell, non-password-change
+    for r in results
+        if r.rtype == "shell" and not self.isPasswordChange(r) then
+            return r
+        end if
+    end for
+    // Pass 3: root computer, non-password-change
+    for r in results
+        if r.rtype == "computer" and r.privilege == "root" and not self.isPasswordChange(r) then
+            return r
+        end if
+    end for
+    // Pass 4: any computer, non-password-change
+    for r in results
+        if r.rtype == "computer" and not self.isPasswordChange(r) then
+            return r
+        end if
+    end for
+    // Pass 5: file result
+    for r in results
+        if r.rtype == "file" then
+            return r
+        end if
+    end for
+    // Pass 6: password-change exploits as last resort
+    for r in results
+        if r.rtype == "shell" and r.privilege == "root" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == "shell" then
+            return r
+        end if
+    end for
+    for r in results
+        if r.rtype == "computer" then
+            return r
+        end if
+    end for
+    return null
+end function
+
+AttackManager.setMediator = function(mediator)
+    self.mediator = mediator
+end function
+
+AttackManager.New = function()
+    result = new AttackManager
+    return result
+end function

@@ -1,0 +1,267 @@
+// ============================================================
+// CORVID | managers/shinylibs-db.txt
+// ShinyLibsDb — persistent store for scored library binaries
+// Keys: "<libname>/<version>" e.g. "kernel_router.so/1.2.3"
+// ============================================================
+
+ShinyLibsDb = {}
+
+// Remote-access lib names we prioritise in display
+ShinyLibsDb.REMOTE_LIBS = [
+    "kernel_router.so",
+    "kernel_module.so",
+    "libssh.so",
+    "libhttp.so",
+    "libftp.so",
+    "libsmtp.so"
+]
+
+// Constraint penalty values used in scoring
+ShinyLibsDb.PENALTY_ADMIN_ACTIVE   = 40
+ShinyLibsDb.PENALTY_ANY_USER       = 20
+ShinyLibsDb.PENALTY_USER_COUNT     = 10
+ShinyLibsDb.PENALTY_PORT_FORWARD   = 10
+ShinyLibsDb.PENALTY_FIREWALL_OFF   = 15
+
+// Result type base scores
+ShinyLibsDb.SCORE_ROOT_SHELL       = 100
+ShinyLibsDb.SCORE_USER_SHELL       = 60
+ShinyLibsDb.SCORE_COMPUTER         = 20
+ShinyLibsDb.SCORE_FILE             = 10
+ShinyLibsDb.SCORE_NUMBER           = 5
+
+// ── init ─────────────────────────────────────────────────────
+ShinyLibsDb.init = function()
+    self.records   = {}   // keyed by libname/version
+    self.staged    = []   // pending collection: {libName, version, filePath, exploits, score, isRemote}
+    self.dataPath  = "/Corvid/Data/shinylibs"
+    self.dbPath    = "/Corvid/Data/shinylibs.json"
+end function
+
+// ── scoreExploit ─────────────────────────────────────────────
+// Parse a single scan_address result string and return a scored exploit map
+ShinyLibsDb.scoreExploit = function(scanText)
+    exploit = {}
+    exploit.raw        = scanText
+    exploit.resultType = "unknown"
+    exploit.score      = 0
+    exploit.conditions = []
+    exploit.isLocal    = false
+
+    lower = scanText.lower
+
+    // Determine result type
+    if lower.indexOf("root") != null and lower.indexOf("shell") != null then
+        exploit.resultType = "root_shell"
+        exploit.score      = ShinyLibsDb.SCORE_ROOT_SHELL
+    else if lower.indexOf("shell") != null then
+        exploit.resultType = "user_shell"
+        exploit.score      = ShinyLibsDb.SCORE_USER_SHELL
+    else if lower.indexOf("computer") != null then
+        exploit.resultType = "computer"
+        exploit.score      = ShinyLibsDb.SCORE_COMPUTER
+    else if lower.indexOf("file") != null then
+        exploit.resultType = "file"
+        exploit.score      = ShinyLibsDb.SCORE_FILE
+    else if lower.indexOf("firewall") != null or lower.indexOf("number") != null then
+        exploit.resultType = "number"
+        exploit.score      = ShinyLibsDb.SCORE_NUMBER
+    end if
+
+    // Local-only flag
+    if lower.indexOf("local") != null then
+        exploit.isLocal = true
+    end if
+
+    // Parse constraints from "* Checking ..." lines
+    lines = scanText.split("\n")
+    for line in lines
+        l = line.trim.lower
+        if l.indexOf("* checking") != 0 then
+            continue
+        end if
+        if l.indexOf("admin") != null or (l.indexOf("active user") != null and l.indexOf("any") == null) then
+            exploit.conditions.push("admin_active")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_ADMIN_ACTIVE
+        else if l.indexOf("any user") != null then
+            exploit.conditions.push("any_user_active")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_ANY_USER
+        else if l.indexOf("registered users") != null or l.indexOf("user count") != null then
+            exploit.conditions.push("user_count")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_USER_COUNT
+        else if l.indexOf("port forward") != null then
+            exploit.conditions.push("port_forward")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_PORT_FORWARD
+        else if l.indexOf("firewall") != null then
+            exploit.conditions.push("firewall_off")
+            exploit.score = exploit.score - ShinyLibsDb.PENALTY_FIREWALL_OFF
+        end if
+    end for
+
+    if exploit.score < 0 then
+        exploit.score = 0
+    end if
+
+    return exploit
+end function
+
+// ── scoreLib ─────────────────────────────────────────────────
+// Given a list of exploit scan strings, return aggregate score and exploit list
+ShinyLibsDb.scoreLib = function(libName, version, exploitTexts)
+    result = {}
+    result.libName   = libName
+    result.version   = version
+    result.exploits  = []
+    result.topScore  = 0
+    result.totalScore = 0
+    result.hasRootNoCondition = false
+    result.isRemote  = ShinyLibsDb.REMOTE_LIBS.indexOf(libName) != null
+
+    for txt in exploitTexts
+        e = ShinyLibsDb.scoreExploit(txt)
+        result.exploits.push(e)
+        result.totalScore = result.totalScore + e.score
+        if e.score > result.topScore then
+            result.topScore = e.score
+        end if
+        if e.resultType == "root_shell" and e.conditions.len == 0 then
+            result.hasRootNoCondition = true
+        end if
+    end for
+
+    return result
+end function
+
+// ── stage ─────────────────────────────────────────────────────
+// Add a scored lib result to staged list if it's shiny vs existing records
+// Returns: "offensive" | "defensive" | "both" | null
+ShinyLibsDb.stage = function(libName, version, exploitTexts, srcPath)
+    scored = ShinyLibsDb.scoreLib(libName, version, exploitTexts)
+    scored.srcPath   = srcPath
+    scored.collected = false
+
+    // Find best offensive and defensive we already have for this lib name
+    bestOffScore = 0
+    bestDefScore = 999999
+    for key in self.records
+        rec = self.records[key]
+        if rec.libName != libName then
+            continue
+        end if
+        if rec.topScore > bestOffScore then
+            bestOffScore = rec.topScore
+        end if
+        if rec.topScore < bestDefScore then
+            bestDefScore = rec.topScore
+        end if
+    end for
+
+    isOffensive = scored.topScore > bestOffScore
+    isDefensive = (bestDefScore == 999999 and scored.exploits.len == 0) or (scored.topScore < bestDefScore and scored.exploits.len == 0)
+
+    if not isOffensive and not isDefensive then
+        return null
+    end if
+
+    scored.shinyType = ""
+    if isOffensive and isDefensive then
+        scored.shinyType = "both"
+    else if isOffensive then
+        scored.shinyType = "offensive"
+    else
+        scored.shinyType = "defensive"
+    end if
+
+    // Check not already staged
+    for s in self.staged
+        if s.libName == libName and s.version == version then
+            return null
+        end if
+    end for
+
+    self.staged.push(scored)
+    return scored.shinyType
+end function
+
+// ── collect ──────────────────────────────────────────────────
+// Move a staged lib into the DB (after user confirms and binary is copied)
+ShinyLibsDb.collect = function(libName, version, localFilePath)
+    key = libName + "/" + version
+    scored = null
+    for s in self.staged
+        if s.libName == libName and s.version == version then
+            scored = s
+            break
+        end if
+    end for
+
+    if scored == null then
+        return Error.New("Not in staged list", "NOT_STAGED")
+    end if
+
+    scored.localPath = localFilePath
+    scored.collected = true
+    self.records[key] = scored
+
+    // Remove from staged
+    newStaged = []
+    for s in self.staged
+        if s.libName != libName or s.version != version then
+            newStaged.push(s)
+        end if
+    end for
+    self.staged = newStaged
+
+    return scored
+end function
+
+// ── getBestOffensive / getBestDefensive ───────────────────────
+ShinyLibsDb.getBestForLib = function(libName)
+    best = null
+    for key in self.records
+        rec = self.records[key]
+        if rec.libName != libName then
+            continue
+        end if
+        if best == null or rec.topScore > best.topScore then
+            best = rec
+        end if
+    end for
+    return best
+end function
+
+ShinyLibsDb.getMostSecureForLib = function(libName)
+    best = null
+    for key in self.records
+        rec = self.records[key]
+        if rec.libName != libName then
+            continue
+        end if
+        // Most secure = fewest exploits, lowest score
+        if best == null or rec.topScore < best.topScore then
+            best = rec
+        end if
+    end for
+    return best
+end function
+
+// ── allLibNames ───────────────────────────────────────────────
+ShinyLibsDb.allLibNames = function()
+    names = []
+    for key in self.records
+        rec = self.records[key]
+        if names.indexOf(rec.libName) == null then
+            names.push(rec.libName)
+        end if
+    end for
+    return names
+end function
+
+// ── serialize / deserialize ───────────────────────────────────
+ShinyLibsDb.serialize = function()
+    return self.records
+end function
+
+ShinyLibsDb.deserialize = function(data)
+    self.records = data
+end function
