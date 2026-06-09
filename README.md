@@ -1,6 +1,6 @@
 # Corvid
 
-DETAILED USER GUIDE HERE: https://docs.google.com/document/d/1RLnszrNG299tYvo3AUjUK86rcuP3vAiYmpXpg1ml3n0/edit?usp=sharing 
+DETAILED USER GUIDE HERE (Updated June 8, 2026): https://docs.google.com/document/d/1-BAMu7jq-UagDj6RpzpgcCeEyv__dQCOO2fUP25nzm0/edit?usp=sharing 
 
 ```
    (oVo)
