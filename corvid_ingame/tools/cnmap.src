@@ -1,0 +1,54 @@
+// cnmap.src — Corvid LAN scanner
+// Deployed to target by lannmap. Uses get_router() in target's LAN context.
+// Writes results to /root/cnmap_out.txt in Corvid's expected format.
+
+outPath = "/root/cnmap_out.txt"
+output = ""
+
+router = get_router()
+if router != null then
+    ips = router.devices_lan_ip
+    if ips == null then
+        ips = []
+    end if
+    for ip in ips
+        output = output + "DEVICE " + ip + char(10)
+        ports = router.device_ports(ip)
+        if ports != null then
+            for port in ports
+                info = router.port_info(port)
+                parts = []
+                if info != null then
+                    parts = info.split(" ")
+                end if
+                svcName = "unknown"
+                svcVer  = "0"
+                fwd = "0"
+                opn = "0"
+                if parts.len >= 1 then
+                    svcName = parts[0]
+                end if
+                if parts.len >= 2 then
+                    svcVer = parts[1]
+                end if
+                if parts.len >= 3 then
+                    fwd = parts[2]
+                end if
+                if parts.len >= 4 then
+                    opn = parts[3]
+                end if
+                output = output + "PORT " + str(port) + " " + svcName + " " + svcVer + " " + fwd + " " + opn + char(10)
+            end for
+        end if
+    end for
+end if
+
+output = output + "DONE"
+
+comp = get_shell.host_computer
+outDir = "/root"
+comp.touch(outDir, "cnmap_out.txt")
+outFile = comp.File(outPath)
+if outFile != null then
+    outFile.set_content(output)
+end if
