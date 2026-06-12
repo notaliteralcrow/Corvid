@@ -26,7 +26,7 @@ A persistent, session-aware hacking toolkit for [Grey Hack](https://store.steamp
 - **Cracks passwords** — integrated Chainsaw cracker (Markov chain + wordlist) fires automatically during escalation
 
 A full command reference and operational guide is available in the [Corvid Handbook].
-https://docs.google.com/document/d/1RLnszrNG299tYvo3AUjUK86rcuP3vAiYmpXpg1ml3n0/edit?usp=sharing
+https://docs.google.com/document/d/1-BAMu7jq-UagDj6RpzpgcCeEyv__dQCOO2fUP25nzm0/edit?usp=sharing 
 
 ---
 
