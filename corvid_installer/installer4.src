@@ -3064,11 +3064,8 @@ _cmd.callback = function(params, mediator)
     // ── clean ────────────────────────────────────────────────────────────
     else if sub == ""reset"" then
         resetIp = """"
-        if params.hasIndex(""ip"") then
-            resetIp = params.ip
-        end if
-        if resetIp.len == 0 and params.hasIndex(""publicip"") then
-            resetIp = params.publicip
+        if params.hasIndex(""subcommand2"") then
+            resetIp = params.subcommand2
         end if
         if resetIp.len == 0 then
             ui.warning(""Usage: bounces reset <ip>  - clears removed_bounce marker so build can re-add it"")
