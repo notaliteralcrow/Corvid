@@ -1454,8 +1454,8 @@ AttackManager.escalate = function()
         ui.info(""Root credentials on file — attempting Clover Method directly..."")
         // skip harvest and passwd decipher, jump straight to Strategy 1
         // (handled below by checking rootPasswords.len before each strategy)
-    else
-        // ── Pre-strategy: harvest current session to surface credentials ───────
+    else if creds.len == 0 then
+        // ── Pre-strategy: harvest if no creds yet (avoids double harvest after stuck prompt) ────
         if not (intelManager isa Error) then
             ui.info(""No root creds on file — harvesting session before escalation attempt..."")
             harvestResult = intelManager.harvestAll(ip, lanIp, true)
