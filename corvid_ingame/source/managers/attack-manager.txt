@@ -489,24 +489,29 @@ AttackManager.escalate = function()
 
     rootPasswords = dbManager.extractRootPasswords(ip)
 
-    // ── Pre-strategy: harvest current session to surface credentials ───────
-    // Harvest passwd, mail, bank before trying credentials - populates DB
-    // so that Strategy 2 has the best credential data to work with
-    intelManager = self.mediator.getExtension("intelManager")
-    if not (intelManager isa Error) then
-        ui.info("Harvesting session before escalation attempt...")
-        harvestResult = intelManager.harvestAll(ip, lanIp, true)
-        if not (harvestResult isa Error) then
-            ui.success("Harvest complete - credentials updated in DB")
-            // Refresh creds from DB after harvest
-            creds = dbManager.findCredentialsByIp(ip)
-            if lanIp.len > 0 and lanIp != ip then
-                lanCreds = dbManager.findCredentialsByIp(lanIp)
-                for lc in lanCreds
-                    creds.push(lc)
-                end for
+    // ── Fast path: if we already have root creds, go straight to Clover ────
+    if rootPasswords.len > 0 then
+        ui.info("Root credentials on file — attempting Clover Method directly...")
+        // skip harvest and passwd decipher, jump straight to Strategy 1
+        // (handled below by checking rootPasswords.len before each strategy)
+    else if creds.len == 0 then
+        // ── Pre-strategy: harvest if no creds yet (avoids double harvest after stuck prompt) ────
+        intelManager = self.mediator.getExtension("intelManager")
+        if not (intelManager isa Error) then
+            ui.info("No root creds on file — harvesting session before escalation attempt...")
+            harvestResult = intelManager.harvestAll(ip, lanIp, true)
+            if not (harvestResult isa Error) then
+                ui.success("Harvest complete - credentials updated in DB")
+                // Refresh creds from DB after harvest
+                creds = dbManager.findCredentialsByIp(ip)
+                if lanIp.len > 0 and lanIp != ip then
+                    lanCreds = dbManager.findCredentialsByIp(lanIp)
+                    for lc in lanCreds
+                        creds.push(lc)
+                    end for
+                end if
+                rootPasswords = dbManager.extractRootPasswords(ip)
             end if
-            rootPasswords = dbManager.extractRootPasswords(ip)
         end if
     end if
 
