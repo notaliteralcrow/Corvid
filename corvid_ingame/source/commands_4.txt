@@ -975,7 +975,70 @@ _cmd.callback = function(params, mediator)
 end function
 commandManager.register(_cmd)
 
-// ── lannmap ──────────────────────────────────────────────────────────────
+// ── get ──────────────────────────────────────────────────────────────────
+// Download a file from current session to pivot (Nest)
+_cmd = new Command
+_cmd.name = "get"
+_cmd.description = "Download file from current session to your Nest. Usage: get <remotepath> <localdir>"
+_cmd.parameters = [StringParameter.New({"name": "remotepath", "required": true}), StringParameter.New({"name": "localdir", "required": false, "default": "/root"})]
+_cmd.permissions = {}
+_cmd.permissions.object = "file"
+_cmd.permissions.privilege = "guest"
+_cmd.callback = function(params, mediator)
+    ui             = mediator.getExtension("corvidUi")
+    sessionManager = mediator.getExtension("sessionManager")
+
+    remotePath = params.remotepath.trim
+    localDir   = params.localdir.trim
+
+    if localDir.len == 0 then
+        localDir = "/root"
+    end if
+
+    pivotSession   = sessionManager.pivotSession
+    currentSession = sessionManager.currentSession
+
+    if pivotSession == null then
+        return Error.New("No pivot session", "NO_PIVOT")
+    end if
+    if currentSession == null then
+        return Error.New("No current session", "NO_SESSION")
+    end if
+    if currentSession == pivotSession then
+        return Error.New("Already on Nest - nothing to download from", "SAME_SESSION")
+    end if
+    if not (currentSession.handler isa ShellSession) then
+        return Error.New("Current session is not a shell session - cannot scp", "NOT_SHELL")
+    end if
+
+    // Verify source file exists on remote
+    srcFile = currentSession.handler.getFile(remotePath)
+    if srcFile isa Error then
+        return Error.New("Remote file not found: " + remotePath, "SRC_NOT_FOUND")
+    end if
+
+    // Verify destination dir exists on Nest
+    destCheck = pivotSession.handler.getFile(localDir)
+    if destCheck isa Error then
+        return Error.New("Local destination not found: " + localDir, "DEST_NOT_FOUND")
+    end if
+
+    // scp from remote shell to pivot
+    ui.info("Downloading " + remotePath + " -> " + localDir + "...")
+
+    remoteShell = currentSession.handler.shell.shell
+    pivotShell  = pivotSession.handler.shell.shell
+
+    result = remoteShell.scp(remotePath, localDir, pivotShell)
+
+    if typeof(result) == "string" and result.len > 0 then
+        return Error.New("Download failed: " + result, "SCP_FAILED")
+    end if
+    ui.success("Downloaded: " + srcFile.name() + " -> " + localDir)
+end function
+commandManager.register(_cmd)
+
+
 // Deploy a tiny LAN scanner to the current root session, run it there
 // so get_router() resolves in the target's network context, then read
 // the results back and import into the DB.
